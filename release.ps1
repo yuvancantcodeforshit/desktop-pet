@@ -2,7 +2,7 @@
 #   dist\DesktopPet.exe      the app (what auto-update downloads)
 #   dist\latest.json         version + SHA-256 the app checks against
 #   dist\DesktopPetSetup.exe installer for new users
-# Then upload all three to a GitHub release (link printed at the end).
+# Then publishes all three as GitHub release v<VERSION> (needs GitHub CLI, signed in once with `gh auth login`).
 Set-Location $PSScriptRoot
 $v = [regex]::Match((Get-Content pet.py -Raw), "VERSION = '([\d.]+)'").Groups[1].Value
 if (-not $v) { throw 'VERSION not found in pet.py' }
@@ -21,5 +21,9 @@ python -m PyInstaller --onefile --noconsole --name DesktopPetSetup --distpath di
     --add-data "$PWD\dist\DesktopPet.exe;." --add-data "$PWD\install.cmd;." --add-data "$PWD\uninstall.cmd;." installer.py
 if ($LASTEXITCODE) { throw 'building DesktopPetSetup.exe failed' }
 
-"Built v$v. Upload dist\DesktopPet.exe, dist\latest.json and dist\DesktopPetSetup.exe here:"
-"https://github.com/yuvancantcodeforshit/desktop-pet/releases/new?tag=v$v"
+$gh = (Get-Command gh -ErrorAction SilentlyContinue).Source
+if (-not $gh) { $gh = "$env:ProgramFiles\GitHub CLI\gh.exe" }
+& $gh release create "v$v" dist\DesktopPet.exe dist\latest.json dist\DesktopPetSetup.exe `
+    --repo yuvancantcodeforshit/desktop-pet --target (git branch --show-current) --title "v$v" --generate-notes
+if ($LASTEXITCODE) { throw 'gh release create failed (run "gh auth login" once?)' }
+"Published v$v. Running apps update within a minute of their next start."
