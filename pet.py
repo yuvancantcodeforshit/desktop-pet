@@ -1,7 +1,7 @@
 """Desktop pet: walks on the taskbar, climbs screen edges, falls, can be dragged and thrown.
 Run: pythonw pet.py   (right-click a pet for Add / Remove / Quit)
 """
-import ctypes, ctypes.wintypes, hashlib, json, os, random, subprocess, sys, threading, tkinter as tk
+import ctypes, ctypes.wintypes, hashlib, io, json, os, random, subprocess, sys, tempfile, threading, tkinter as tk
 import urllib.request
 
 VERSION = '1.0.1'        # bump before each release; release.ps1 reads it
@@ -9,18 +9,33 @@ REPO = 'yuvancantcodeforshit/desktop-pet'
 UPDATE_URL = f'https://github.com/{REPO}/releases/latest/download/'
 MAX_EXE = 100_000_000    # refuse absurd downloads
 
+FROZEN = getattr(sys, 'frozen', False)  # True when running as the built DesktopPet.exe
+
 SIZE = 64
 KEY = '#010203'          # colour made fully transparent
 GRAVITY = 1.5
 BODY, LINE, CHEEK = '#7ecf8f', '#2f6b3c', '#f4a6b8'
 
 
-def work_area(root):
-    """Screen rect minus the taskbar, so pets stand on top of it."""
-    r = ctypes.wintypes.RECT()
-    if ctypes.windll.user32.SystemParametersInfoW(0x30, 0, ctypes.byref(r), 0):  # SPI_GETWORKAREA
-        return r.left, r.top, r.right, r.bottom
-    return 0, 0, root.winfo_screenwidth(), root.winfo_screenheight()
+class MONITORINFO(ctypes.Structure):
+    _fields_ = [('cbSize', ctypes.wintypes.DWORD), ('rcMonitor', ctypes.wintypes.RECT),
+                ('rcWork', ctypes.wintypes.RECT), ('dwFlags', ctypes.wintypes.DWORD)]
+
+
+user32 = ctypes.windll.user32
+user32.MonitorFromPoint.restype = ctypes.c_void_p  # HMONITOR is pointer-sized; default int would truncate it
+user32.MonitorFromPoint.argtypes = [ctypes.wintypes.POINT, ctypes.wintypes.DWORD]
+user32.GetMonitorInfoW.argtypes = [ctypes.c_void_p, ctypes.POINTER(MONITORINFO)]
+
+
+def work_area(x=0, y=0):
+    """Screen rect minus the taskbar of the monitor at (x, y), so pets stand on top of it.
+    (0, 0) is always the primary monitor; off-screen points use the nearest monitor."""
+    mon = user32.MonitorFromPoint(ctypes.wintypes.POINT(int(x), int(y)), 2)  # MONITOR_DEFAULTTONEAREST
+    mi = MONITORINFO(cbSize=ctypes.sizeof(MONITORINFO))
+    user32.GetMonitorInfoW(mon, ctypes.byref(mi))
+    r = mi.rcWork
+    return r.left, r.top, r.right, r.bottom
 
 
 def newer(a, b):
@@ -28,8 +43,9 @@ def newer(a, b):
     return tuple(map(int, a.split('.'))) > tuple(map(int, b.split('.')))
 
 
-def download_update():
+def download_update(exe=None):
     """Background: fetch a newer DesktopPet.exe from GitHub Releases, keep it only if its SHA-256 matches."""
+    exe = exe or sys.executable
     try:
         with urllib.request.urlopen(UPDATE_URL + 'latest.json', timeout=10) as r:  # HTTPS, cert-checked
             info = json.loads(r.read(10_000))
@@ -39,10 +55,10 @@ def download_update():
             data = r.read(MAX_EXE + 1)
         if len(data) > MAX_EXE or hashlib.sha256(data).hexdigest() != info['sha256'].lower():
             return
-        part = sys.executable + '.part'
+        part = exe + '.part'
         with open(part, 'wb') as f:
             f.write(data)
-        os.replace(part, sys.executable + '.new')  # .new only ever holds a verified file
+        os.replace(part, exe + '.new')  # .new only ever holds a verified file
     except Exception:
         pass  # offline, no release yet, bad manifest: keep running this version
 
@@ -59,9 +75,23 @@ def apply_update():
         os.replace(exe + '.new', exe)
     except OSError:
         return False
-    # reset so the new exe unpacks fresh instead of reusing this process's temp folder
-    subprocess.Popen([exe], cwd=os.path.dirname(exe), env=dict(os.environ, PYINSTALLER_RESET_ENVIRONMENT='1'))
+    # PYINSTALLER_RESET_ENVIRONMENT: new exe unpacks fresh instead of reusing this process's temp folder.
+    # DESKTOPPET_RESTART: new exe waits for this one to exit instead of quitting as a second copy.
+    subprocess.Popen([exe], cwd=os.path.dirname(exe),
+                     env=dict(os.environ, PYINSTALLER_RESET_ENVIRONMENT='1', DESKTOPPET_RESTART='1'))
     return True
+
+
+def single_instance():
+    """Hold a named lock for this process's lifetime. False if another copy already runs."""
+    k32 = ctypes.WinDLL('kernel32', use_last_error=True)
+    k32.CreateMutexW.restype = ctypes.c_void_p
+    h = k32.CreateMutexW(None, True, 'DesktopPetSingleInstance')
+    if ctypes.get_last_error() != 183:  # not ERROR_ALREADY_EXISTS: we own it
+        return True
+    wait = 10_000 if os.environ.get('DESKTOPPET_RESTART') else 0
+    # 0 = got it, 0x80 = previous owner exited without releasing (also ours now)
+    return k32.WaitForSingleObject(ctypes.c_void_p(h), wait) in (0, 0x80)
 
 
 class Pet:
@@ -73,7 +103,7 @@ class Pet:
         w.attributes('-transparentcolor', KEY)
         self.cv = tk.Canvas(w, width=SIZE, height=SIZE, bg=KEY, highlightthickness=0, cursor='hand2')
         self.cv.pack()
-        L, T, R, B = app.area
+        self.area = L, T, R, B = work_area()  # new pets start on the primary monitor
         self.x, self.y = random.randint(L, R - SIZE), T
         self.vx = self.vy = 0
         self.dir = random.choice((-1, 1))
@@ -101,7 +131,11 @@ class Pet:
 
     def drop(self, _):
         self.vx, self.vy = max(-25, min(25, self.vx)), max(-25, min(25, self.vy))  # throw
+        self.update_area()  # dropped on another monitor: live there
         self.set('fall')
+
+    def update_area(self):
+        self.area = work_area(self.x + SIZE // 2, self.y + SIZE // 2)
 
     def menu(self, e):
         m = tk.Menu(self.win, tearoff=0)
@@ -113,7 +147,7 @@ class Pet:
 
     # --- behaviour ---
     def step(self):
-        L, T, R, B = self.app.area
+        L, T, R, B = self.area
         floor, s = B - SIZE, self.state
         self.frame += 1
         self.timer -= 1
@@ -190,18 +224,24 @@ class App:
     def __init__(self):
         self.root = tk.Tk()
         self.root.withdraw()
-        self.area = work_area(self.root)
         self.pets = []
+        self.minutes = 0
         self.add()
-        if getattr(sys, 'frozen', False):  # only the installed exe self-updates, not `python pet.py`
+        if FROZEN:
             threading.Thread(target=download_update, daemon=True).start()
-            self.root.after(60_000, self.poll_update)
+        self.root.after(60_000, self.every_minute)
 
-    def poll_update(self):
-        if apply_update():
-            self.root.destroy()
-        else:
-            self.root.after(60_000, self.poll_update)
+    def every_minute(self):
+        for p in self.pets:  # resolution, taskbar or monitor layout may have changed
+            p.update_area()
+        self.minutes += 1
+        if FROZEN:  # only the installed exe self-updates, not `python pet.py`
+            if apply_update():
+                self.root.destroy()
+                return
+            if self.minutes % 360 == 0:  # pets left running for days still get updates (every 6 h)
+                threading.Thread(target=download_update, daemon=True).start()
+        self.root.after(60_000, self.every_minute)
 
     def add(self):
         self.pets.append(Pet(self))
@@ -214,16 +254,33 @@ class App:
             self.root.destroy()
 
 
+def check_updater():
+    """Wrong SHA-256 must leave no .new file; right one must produce it."""
+    payload = b'pretend exe'
+    real = urllib.request.urlopen
+    with tempfile.TemporaryDirectory() as d:
+        exe = os.path.join(d, 'DesktopPet.exe')
+        try:
+            for sha, want in (('0' * 64, False), (hashlib.sha256(payload).hexdigest(), True)):
+                manifest = json.dumps({'version': '999.0.0', 'sha256': sha}).encode()
+                urllib.request.urlopen = lambda url, timeout: io.BytesIO(manifest if url.endswith('.json') else payload)
+                download_update(exe)
+                assert os.path.exists(exe + '.new') == want, f'sha {sha[:8]}: .new exists={not want}'
+        finally:
+            urllib.request.urlopen = real
+
+
 def selftest():
     assert newer('1.0.10', '1.0.9') and not newer('1.0.0', '1.0.0') and not newer('0.9', '1.0')
+    check_updater()
     app = App()
     p = app.pets[0]
-    floor = app.area[3] - SIZE
+    L, T, R, B = p.area
     for _ in range(200):
         p.step()
-        assert app.area[0] <= p.x <= app.area[2] - SIZE, p.x
-    assert p.y <= floor
-    p.x, p.state, p.dir = app.area[2] - SIZE, 'walk', 1  # walk into right wall
+        assert L <= p.x <= R - SIZE, p.x
+    assert p.y <= B - SIZE
+    p.x, p.state, p.dir = R - SIZE, 'walk', 1  # walk into right wall
     p.step()
     assert p.state == 'climb' or p.dir == -1
     app.root.destroy()
@@ -232,9 +289,15 @@ def selftest():
 
 if __name__ == '__main__':
     if '--selftest' in sys.argv:
-        selftest()
+        try:
+            selftest()
+        except Exception as e:  # exit code, not a crash dialog: release.ps1 runs this on the built exe
+            print('selftest FAILED:', repr(e))
+            sys.exit(1)
     else:
-        if getattr(sys, 'frozen', False):
+        if FROZEN:
+            if not single_instance():
+                sys.exit()  # already running
             try:
                 os.remove(sys.executable + '.old')  # leftover from the last update
             except OSError:
