@@ -4,7 +4,7 @@ Run: pythonw pet.py   (right-click a pet for Add / Remove / Quit)
 import ctypes, ctypes.wintypes, hashlib, io, json, os, random, subprocess, sys, tempfile, threading, tkinter as tk
 import urllib.request
 
-VERSION = '1.0.1'        # bump before each release; release.ps1 reads it
+VERSION = '1.0.2'        # bump before each release; release.ps1 reads it
 REPO = 'yuvancantcodeforshit/desktop-pet'
 UPDATE_URL = f'https://github.com/{REPO}/releases/latest/download/'
 MAX_EXE = 100_000_000    # refuse absurd downloads
