@@ -12,7 +12,8 @@ if ($Version -notmatch '^\d+\.\d+\.\d+$') { throw 'Version must look like 1.0.1'
 $src = [IO.File]::ReadAllText("$PWD\pet.py")
 $old = [regex]::Match($src, "VERSION = '([\d.]+)'").Groups[1].Value
 if (-not $old) { throw 'VERSION not found in pet.py' }
-if ([version]$Version -le [version]$old) { throw "Version must be higher than the current $old" }
+# Same version allowed: lets you re-run after a failed push; gh refuses a duplicate release anyway.
+if ([version]$Version -lt [version]$old) { throw "Version must not be lower than the current $old" }
 if ((git branch --show-current) -ne 'main') { throw 'Switch to main first: git switch main' }
 
 python pet.py --selftest
@@ -23,6 +24,8 @@ if ($LASTEXITCODE) { throw 'selftest failed' }
 $w = "$env:TEMP\petbuild"
 python -m PyInstaller --onefile --noconsole --name DesktopPet --distpath dist --workpath $w --specpath $w --log-level ERROR pet.py
 if ($LASTEXITCODE) { throw 'building DesktopPet.exe failed' }
+# Test the packed exe too: a broken build would ship to every pet and could never update itself again.
+if ((Start-Process dist\DesktopPet.exe -ArgumentList '--selftest' -Wait -PassThru).ExitCode) { throw 'built DesktopPet.exe failed its selftest' }
 
 $hash = (Get-FileHash dist\DesktopPet.exe -Algorithm SHA256).Hash.ToLower()
 @{ version = $Version; sha256 = $hash } | ConvertTo-Json | Set-Content dist\latest.json -Encoding ascii
