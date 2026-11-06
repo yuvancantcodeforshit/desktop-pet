@@ -17,7 +17,7 @@ COLORS = (('Mint', '#7ecf8f'), ('Sky', '#7cc4f2'), ('Lavender', '#b9a3f0'), ('Pe
 FONTS = ('Segoe UI', 'Segoe UI Variable Display', 'Bahnschrift', 'Cascadia Mono', 'Trebuchet MS', 'Comic Sans MS', 'Georgia')
 RESTYLE = {'theme', 'accent', 'font'}         # redraw the whole window
 REFRESH = {'character', 'style', 'color'}     # redraw the pages that show the character; sliders redraw nothing
-W, H, MIN_H = 400, 660, 360
+W, H, MIN_H = 460, 660, 360  # width is fixed; only the height can be dragged
 DANGER = '#ff6b6b'
 CLOSE_RED = '#c42b1c'  # Windows' own close-button red
 
@@ -43,7 +43,7 @@ class Tip:
         widget.bind('<ButtonPress-1>', self.leave, add='+')
 
     def enter(self, _):
-        self.job = self.w.after(450, self.show)
+        self.job = self.w.after(1, self.show)  # straight away; after() so a quick pass-over can cancel it
 
     def leave(self, _=None):
         if self.job:
@@ -147,33 +147,47 @@ class SettingsWindow:
         self.app.quit_if_idle()
 
     def show(self, tab):
-        """Switch tabs: build the page the first time, afterwards just swap which one is visible."""
+        """Switch tabs. Every page stays placed in the same spot; the chosen one is raised to the top.
+        Nothing is hidden or re-shown, so nothing has to repaint (hiding made CustomTkinter redraw = flash)."""
         self.tab = tab
         if tab not in self.pages:
             self.pages[tab] = self.make_page(tab)
-        for key, page in self.pages.items():
-            if key != tab:
-                page.pack_forget()
-        self.pages[tab].pack(fill='both', expand=True)
+        self.raise_page(tab)
         self.color_tabs()
         self.win.deiconify()
         self.win.lift()
+        self.win.focus_force()  # take the foreground, so the first click lands on our buttons
+
+    def raise_page(self, tab):
+        page = self.pages[tab]
+        getattr(page, '_parent_frame', page).lift()  # a scrollable frame lives inside its own outer frame
 
     def make_page(self, tab):
-        self.body = ctk.CTkScrollableFrame(self.win, fg_color=self.c['bg'], corner_radius=0,
+        self.body = ctk.CTkScrollableFrame(self.stack, fg_color=self.c['bg'], corner_radius=0,
                                            scrollbar_button_color=self.c['card'],
                                            scrollbar_button_hover_color=self.c['hover'])
         getattr(self, 'page_' + tab)()
+        self.body.place(relx=0, rely=0, relwidth=1, relheight=1)
         return self.body
 
+    def prebuild(self):
+        """Build the tabs not opened yet, one per idle moment, under the current one: first visits are instant too."""
+        for key, *_ in TABS:
+            if key not in self.pages:
+                self.pages[key] = self.make_page(key)
+                self.raise_page(self.tab)
+                self.win.after(30, self.prebuild)
+                return
+
     def refresh(self):
-        """Settings that pages show changed: rebuild the visible page off-screen and swap it in (no flash);
-        the other pages are dropped and rebuilt when next opened."""
+        """Settings that pages show changed: rebuild the visible page and put it on top (old one still covers
+        the spot until then, so no flash); the other pages are rebuilt quietly underneath."""
         old = self.pages
         self.pages = {self.tab: self.make_page(self.tab)}
-        self.pages[self.tab].pack(fill='both', expand=True)
+        self.raise_page(self.tab)
         for page in old.values():
             page.destroy()
+        self.win.after(30, self.prebuild)
 
     # --- building blocks ---
     def restyle(self):
@@ -198,7 +212,10 @@ class SettingsWindow:
         grip.bind('<ButtonPress-1>', self.grip_press)
         grip.bind('<B1-Motion>', self.grip_drag)
         self.tabbar()
+        self.stack = ctk.CTkFrame(self.win, fg_color=bg, corner_radius=0)  # all pages sit here, on top of each other
+        self.stack.pack(fill='both', expand=True)
         self.show(self.tab)
+        self.win.after(300, self.prebuild)
 
     def titlebar(self):
         c = self.c
@@ -214,12 +231,12 @@ class SettingsWindow:
                                ('', self.minimize, 'Minimize')):
             red = cmd == self.close
             b = ctk.CTkButton(bar, text=icon, width=36, height=28, corner_radius=6, font=ctk.CTkFont(family=ICONS, size=11),
-                              fg_color='transparent', hover_color=CLOSE_RED if red else c['btn_hover'],
+                              fg_color='transparent', hover_color=c['btn_hover'], hover=not red,
                               text_color=c['text'], command=cmd)
             b.pack(side='right', padx=2, pady=4)
-            if red:  # white glyph on the red square
-                b.bind('<Enter>', lambda e, b=b: b.configure(text_color='#ffffff'), add='+')
-                b.bind('<Leave>', lambda e, b=b: b.configure(text_color=c['text']), add='+')
+            if red:  # red square + white glyph drawn by hand: changing the glyph colour would wipe CTk's own hover
+                b.bind('<Enter>', lambda e, b=b: b.configure(fg_color=CLOSE_RED, text_color='#ffffff'), add='+')
+                b.bind('<Leave>', lambda e, b=b: b.configure(fg_color='transparent', text_color=c['text']), add='+')
             self.title_buttons.append((b, Tip(b, tip, self)))
         for w in (bar, title, ver):
             w.bind('<ButtonPress-1>', self.grab)
@@ -283,7 +300,7 @@ class SettingsWindow:
         self.label(row, text, width=70, anchor='w').pack(side='left')
         value = self.label(row, '', width=44)
         show = lambda v: value.configure(text=f'{v:g}' if key == 'pets' else f'{v:.1f}x')
-        sl = ctk.CTkSlider(row, from_=lo, to=hi, number_of_steps=steps, width=190, progress_color=self.c['acc'],
+        sl = ctk.CTkSlider(row, from_=lo, to=hi, number_of_steps=steps, width=250, progress_color=self.c['acc'],
                            button_color=self.c['acc'], button_hover_color=shade(self.c['acc'], 0.85))
         sl.set(self.app.settings[key])
         show(self.app.settings[key])
@@ -297,6 +314,30 @@ class SettingsWindow:
         sl.pack(side='left', padx=6)
         value.pack(side='left')
         self.sliders[key] = (sl, show)
+
+    def stepper(self, parent, key, text, lo, hi):
+        """Whole number with down/up arrow buttons, kept between lo and hi."""
+        row = ctk.CTkFrame(parent, fg_color='transparent')
+        row.pack(fill='x', padx=12, pady=4)
+        self.label(row, text, width=70, anchor='w').pack(side='left')
+        value = self.label(row, '', 15, True, width=40)
+        show = lambda v: value.configure(text=str(v))
+
+        def step(d):
+            v = max(lo, min(hi, self.app.settings[key] + d))
+            if v != self.app.settings[key]:
+                self.change(key, v)
+            show(self.app.settings[key])
+        arrow = lambda icon, d: ctk.CTkButton(row, text=icon, width=34, height=30, corner_radius=8,
+                                              font=ctk.CTkFont(family=ICONS, size=11), fg_color=self.c['hover'],
+                                              hover_color=shade(self.c['hover'], 1.25), text_color=self.c['text'],
+                                              command=lambda: step(d))
+        arrow('', -1).pack(side='left', padx=(6, 0))  # chevron down
+        value.pack(side='left', padx=4)
+        arrow('', 1).pack(side='left')  # chevron up
+        self.label(row, f'max {hi}', 11, muted=True).pack(side='left', padx=10)
+        show(self.app.settings[key])
+        self.sliders[key] = (None, show)
 
     def switch(self, parent, title, desc, value, command, enabled=True):
         row = ctk.CTkFrame(parent, fg_color='transparent')
@@ -325,19 +366,40 @@ class SettingsWindow:
             if not self.win.winfo_exists():
                 return
             c, k = self.preview, self.k
-            if c is not None and c.winfo_exists() and c.winfo_ismapped():
+            if c is not None and c.winfo_exists():
                 c.delete('all')
+                s = self.app.settings
                 if self.app.pack:
-                    self.core.draw_pack(c, self.app.pack, 'idle', 1, self.frame, int(124 * k), x=int(90 * k))
+                    pack = self.smooth_pack(s['character'], int(110 * k))
+                    if pack:
+                        self.core.draw_pack(c, pack, 'idle', 1, self.frame, int(124 * k), x=int(90 * k))
                 else:
-                    s = self.app.settings
-                    self.core.draw_blob(c, s['color'], 'idle', 1, self.frame + 50, 0, s['style'])
-                    c.scale('all', 0, 0, 1.9 * k, 1.9 * k)
-                    c.move('all', 29 * k, 2 * k)
+                    blink = self.frame % 150 < 6  # blink for a moment every few seconds
+                    img = self.blob_photo(int(118 * k), s['color'], s['style'], 0 if blink else 50)
+                    c.create_image(int(90 * k), int(128 * k), anchor='s', image=img)
             self.frame += 3
             self.win.after(100, self.animate)
         except tk.TclError:
             pass  # window went away mid-frame
+
+    def blob_photo(self, px, color, style, f=50):
+        """Smooth (anti-aliased) blob picture, cached; tk canvas shapes have jagged edges."""
+        from PIL import ImageTk
+        key = ('blob', px, color, style, f)
+        if key not in self.thumbs:
+            self.thumbs[key] = ImageTk.PhotoImage(self.core.blob_image(px, color, style, f))
+        return self.thumbs[key]
+
+    def smooth_pack(self, name, px):
+        """A pack's frames with soft edges for this window (the pets use hard-edged ones), cached."""
+        key = (name, px)
+        if key not in self.thumbs:
+            try:
+                self.thumbs[key] = packs.load_frames(os.path.join(self.core.PACKS_DIR, name), px, smooth=True)
+            except Exception:
+                self.thumbs[key] = None
+        pack = self.thumbs[key]
+        return pack if pack and 'idle' in pack[0] else None
 
     def canvas(self, parent, w, h, bg):
         """Plain tk canvas sized for the display scaling (CustomTkinter scales its own widgets, not these)."""
@@ -349,18 +411,11 @@ class SettingsWindow:
         c = self.canvas(parent, 40, 40, self.c['hover'])
         if not name:
             s = self.app.settings
-            self.core.draw_blob(c, s['color'], f=50, style=s['style'])
-            c.scale('all', 0, 0, 0.6 * k, 0.6 * k)
-            c.move('all', k, k)
+            c.create_image(int(20 * k), int(39 * k), anchor='s', image=self.blob_photo(int(38 * k), s['color'], s['style']))
             return c
-        key = (name, int(36 * k))
-        if key not in self.thumbs:
-            try:
-                self.thumbs[key] = packs.load_frames(os.path.join(self.core.PACKS_DIR, name), key[1])
-            except Exception:
-                self.thumbs[key] = None
-        if self.thumbs[key] and 'idle' in self.thumbs[key][0]:
-            self.core.draw_pack(c, self.thumbs[key], 'idle', 1, 0, int(38 * k), x=int(20 * k))
+        pack = self.smooth_pack(name, int(36 * k))
+        if pack:
+            self.core.draw_pack(c, pack, 'idle', 1, 0, int(38 * k), x=int(20 * k))
         return c
 
     # --- Home ---
@@ -388,7 +443,7 @@ class SettingsWindow:
         ctk.CTkFrame(c, height=4, fg_color='transparent').pack()
         self.slider(c, 'speed', 'Speed', 0.5, 3, 25)
         self.slider(c, 'size', 'Size', 0.5, 2.5, 20)
-        self.slider(c, 'pets', 'Pets', 0, 10, 10)
+        self.stepper(c, 'pets', 'Pets', 0, 10)
         ctk.CTkFrame(c, height=4, fg_color='transparent').pack()
         self.switch(self.card(), 'Show pets', 'Hide every pet without quitting. The tray icon can bring them back.',
                     self.app.visible, self.app.set_visible)
@@ -401,7 +456,8 @@ class SettingsWindow:
             hint = 'Click to send one out' if n < 10 else 'That is all 10 of them!'
             self.count.configure(text=f'{hint}  ·  {n} on your desk')
             sl, show = self.sliders['pets']
-            sl.set(n)
+            if sl:
+                sl.set(n)
             show(n)
         except (AttributeError, KeyError, tk.TclError):
             pass  # Home page not built yet

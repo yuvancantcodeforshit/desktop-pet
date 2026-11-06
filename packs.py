@@ -111,8 +111,9 @@ def delete_pack(packs_dir, name):
     shutil.rmtree(path)
 
 
-def load_frames(folder, px):
-    """({state: (frames facing right, frames facing left)}, fps). Frames are PhotoImages fitted in a px square."""
+def load_frames(folder, px, smooth=False):
+    """({state: (frames facing right, frames facing left)}, fps). Frames are PhotoImages fitted in a px square.
+    smooth keeps soft edges (for the Settings window); the pets need hard edges (see below)."""
     meta = read_meta(folder)
     fps = meta.get('fps', 8)
     fps = min(30, max(1, fps)) if isinstance(fps, (int, float)) and not isinstance(fps, bool) else 8
@@ -128,8 +129,8 @@ def load_frames(folder, px):
                 k = px / max(fr.size)
                 fr = fr.resize((max(1, round(fr.width * k)), max(1, round(fr.height * k))),
                                Image.NEAREST if k > 1 else Image.LANCZOS)  # NEAREST keeps pixel art crisp
-                # the pet window can only show fully clear or fully solid pixels
-                fr.putalpha(fr.getchannel('A').point(lambda v: 255 if v >= 128 else 0))
+                if not smooth:  # the pet window can only show fully clear or fully solid pixels
+                    fr.putalpha(fr.getchannel('A').point(lambda v: 255 if v >= 128 else 0))
                 right.append(ImageTk.PhotoImage(fr))
                 left.append(ImageTk.PhotoImage(ImageOps.mirror(fr)))
         out[stem] = (right, left)

@@ -381,6 +381,50 @@ def draw_pack(c, pack, s, d, f, px, x=None):
     c.create_image(px // 2 if x is None else x, px, anchor='s', image=seq[int(f * fps / 30) % len(seq)])
 
 
+class PilCanvas:
+    """The bit of the tk.Canvas drawing API that draw_blob uses, painted onto a PIL image 4x larger and shrunk,
+    so edges come out smooth (tk's canvas has no anti-aliasing)."""
+
+    def __init__(self, size):
+        from PIL import Image, ImageDraw
+        self.size, self.k = size, size * 4 / SIZE
+        self.img = Image.new('RGBA', (size * 4, size * 4), (0, 0, 0, 0))
+        self.d = ImageDraw.Draw(self.img)
+
+    def _at(self, pts):
+        return [v * self.k for v in pts]
+
+    def _w(self, width):
+        return max(1, round(width * self.k))
+
+    def create_oval(self, *xy, fill='', outline='', width=1):
+        self.d.ellipse(self._at(xy), fill=fill or None, outline=outline or None, width=self._w(width) if outline else 0)
+
+    def create_rectangle(self, *xy, fill='', outline='', width=1):
+        self.d.rectangle(self._at(xy), fill=fill or None, outline=outline or None, width=self._w(width) if outline else 0)
+
+    def create_polygon(self, *pts, fill='', outline='', width=1):
+        self.d.polygon(self._at(pts), fill=fill or None, outline=outline or None, width=self._w(width) if outline else 0)
+
+    def create_line(self, *pts, fill='', width=1):
+        self.d.line(self._at(pts), fill=fill, width=self._w(width))
+
+    def create_arc(self, *xy, start=0, extent=90, style='arc', outline='', width=1):
+        # tk: degrees counter-clockwise from 3 o'clock; PIL: clockwise
+        self.d.arc(self._at(xy), -(start + extent), -start, fill=outline, width=self._w(width))
+
+    def image(self):
+        from PIL import Image
+        return self.img.resize((self.size, self.size), Image.LANCZOS)
+
+
+def blob_image(size, color, style='Blob', f=50):
+    """Smooth size x size picture of the default pet (f=50: eyes open, 0: blinking)."""
+    pc = PilCanvas(size)
+    draw_blob(pc, color, 'idle', 1, f, 0, style)
+    return pc.image()
+
+
 def draw_blob(c, color, s='idle', d=1, f=0, step=0, style='Blob'):
     """The default pet at 64 px on canvas c: state s, facing d (-1/1), animation frame f, foot step offset,
     style one of BLOB_STYLES (ears, ghost tail)."""
@@ -702,6 +746,8 @@ def selftest():
         for style in BLOB_STYLES:
             app.settings['style'] = style
             p.draw()
+            img = blob_image(40, '#7ecf8f', style)
+            assert img.size == (40, 40) and img.getpixel((24, 24))[3] == 255, style  # smooth picture, solid body
         app.open_settings()
         panel = app.panel
         for tab in ('home', 'characters', 'customize', 'settings'):
