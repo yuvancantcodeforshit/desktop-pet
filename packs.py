@@ -11,7 +11,7 @@ import io, json, os, re, shutil, zipfile
 
 from PIL import Image, ImageOps, ImageSequence, ImageTk
 
-STATES = ('idle', 'walk', 'fall', 'drag', 'sit', 'climb', 'ceiling', 'run', 'lie', 'dance')
+STATES = ('idle', 'walk', 'fall', 'drag', 'sit', 'climb', 'ceiling', 'run', 'lie', 'dance', 'land')
 EXTS = ('.gif', '.png')
 MAX_FILE = 20_000_000    # bytes per image
 MAX_SIDE = 2048          # px
@@ -138,7 +138,8 @@ def import_pack(src, packs_dir):
 # Shimeji action names that feed each pet state (first one found wins)
 SHIMEJI_ACTIONS = {'idle': ('Stand',), 'walk': ('Walk',), 'fall': ('Falling', 'Fall'), 'drag': ('Pinched', 'Resisting'),
                    'sit': ('Sit',), 'climb': ('ClimbWall', 'GrabWall'), 'ceiling': ('ClimbCeiling', 'GrabCeiling'),
-                   'run': ('Run', 'Dash'), 'lie': ('Sprawl', 'LieDown'), 'dance': ('Dancing', 'Dance', 'AnimationDancing')}
+                   'run': ('Run', 'Dash'), 'lie': ('Sprawl', 'LieDown'), 'dance': ('Dancing', 'Dance', 'AnimationDancing'),
+                   'land': ('StandFromFloor', 'Bouncing')}
 MAX_CHARACTERS = 20
 MAX_TICKS = 250  # longest pose we keep, in Shimeji ticks (25 per second)
 

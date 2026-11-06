@@ -1,4 +1,4 @@
-"""Desktop pet: walks on the taskbar, climbs screen edges, falls, can be dragged and thrown.
+﻿"""Desktop pet: walks on the taskbar, climbs screen edges, falls, can be dragged and thrown.
 Run: pythonw pet.py   (right-click a pet for Settings / Add / Remove / Quit; tray icon too)
 """
 import ctypes, ctypes.wintypes, hashlib, io, json, math, os, queue, random, re, shutil, subprocess, sys, tempfile, threading, time
@@ -305,6 +305,7 @@ def single_instance():
 
 
 STEP = 1 / 30  # seconds per movement step
+ONCE = ('land', 'fall')  # pack animations that play through once and hold their last picture
 FLOOR_STATES = ('walk', 'run', 'idle', 'sit', 'lie', 'dance')
 STAND_INS = {'run': ('walk',), 'chase': ('run', 'walk'), 'lie': ('sit',), 'ceiling': ('drag',)}  # pack lacks a state
 
@@ -372,6 +373,18 @@ class Pet:
 
     def set(self, state, timer=None):
         self.state, self.timer = state, timer or random.randint(40, 200)
+        self.since = getattr(self, 'frame', 0)  # pack animations start from their first picture
+
+    def land(self):
+        """Touched down: play the pack's landing animation once (Shimeji StandFromFloor), or a quick squash."""
+        frames = self.app.pack[0] if self.app.pack else None
+        if frames is None:
+            self.set('land', 6)
+        elif 'land' in frames:
+            fps = self.app.pack[1]
+            self.set('land', max(1, round(len(frames['land'][0]) * 30 / fps)))
+        else:
+            self.set('idle')
 
     def resize(self):
         self.px = int(pet_px(self.app.settings) * (self.app.pack_scale if self.app.pack else 1))
@@ -445,6 +458,9 @@ class Pet:
                 self.ledge, floor = w, w[2] - px
             if self.y >= floor:
                 self.y, self.vx, self.vy = floor, 0, 0
+                self.land()
+        elif s == 'land':
+            if self.timer <= 0:
                 self.set('idle')
         elif s in ('walk', 'run', 'chase'):
             if s == 'chase':  # after the mouse pointer, as long as it stays on this screen
@@ -550,7 +566,8 @@ class Pet:
             frames, fps = self.app.pack
             pair = next((frames[k] for k in (s,) + STAND_INS.get(s, ()) if k in frames), frames['idle'])
             seq = pair[1] if d < 0 else pair[0]
-            return seq[int(f * fps / 30) % len(seq)]
+            i = int((f - self.since) * fps / 30)
+            return seq[min(i, len(seq) - 1) if s in ONCE else i % len(seq)]
         step = 0
         if s in ('walk', 'climb', 'ceiling', 'run', 'chase', 'dance'):
             period = 0.2 if s in ('run', 'chase') else 0.34  # seconds per stride
@@ -641,7 +658,7 @@ def blob_image(size, color, style='Blob', f=50):
 def draw_blob(c, color, s='idle', d=1, f=0, step=0, style='Blob'):
     """The default pet at 64 px on canvas c: state s, facing d (-1/1), animation frame f, foot step offset,
     style one of BLOB_STYLES (ears, ghost tail)."""
-    top = 26 if s == 'sit' else 34 if s == 'lie' else 20 if s == 'ceiling' else 14 + abs(step) * 0.7
+    top = 26 if s in ('sit', 'land') else 34 if s == 'lie' else 20 if s == 'ceiling' else 14 + abs(step) * 0.7
     if s == 'ceiling':  # hanging from the top edge: arms up, one hand forward per step
         c.create_line(24, top + 8, 22 + step, 0, fill=LINE, width=3)
         c.create_line(40, top + 8, 42 - step, 0, fill=LINE, width=3)
@@ -1019,7 +1036,7 @@ def selftest():
         p.set('fall')
         for _ in range(10):
             p.step()
-        assert p.ledge and p.state == 'idle' and p.y == T + 400 - p.px, (p.state, p.y)
+        assert p.ledge and p.state in ('land', 'idle') and p.y == T + 400 - p.px, (p.state, p.y)
         app.win = (12345, L + 150, T + 380, L + 750)
         p.step()
         assert p.y == T + 380 - p.px and p.ledge[1] == L + 150, 'rides the moved window'
