@@ -8,10 +8,6 @@ import customtkinter as ctk
 
 import packs
 
-# The pets already run at Windows' display scaling; CustomTkinter scaling on top made the window
-# 1.25 x too big and off-centre on a 125% screen.
-ctk.deactivate_automatic_dpi_awareness()
-
 ICONS = 'Segoe Fluent Icons'  # ships with Windows 11
 TABS = (('home', '', 'Home'), ('characters', '', 'Characters'),
         ('customize', '', 'Customize'), ('settings', '', 'Settings'))
@@ -19,9 +15,11 @@ COLORS = (('Mint', '#7ecf8f'), ('Sky', '#7cc4f2'), ('Lavender', '#b9a3f0'), ('Pe
           ('Coral', '#f2847a'), ('Rose', '#f29fc4'), ('Teal', '#4fc1b3'), ('Grey', '#b0b0b0'), ('Midnight', '#4a5a8a'),
           ('Snow', '#f4f4f4'), ('Lime', '#b5e35a'))
 FONTS = ('Segoe UI', 'Segoe UI Variable Display', 'Bahnschrift', 'Cascadia Mono', 'Trebuchet MS', 'Comic Sans MS', 'Georgia')
-REBUILD = {'theme', 'accent', 'font', 'character', 'style', 'color'}  # changes that redraw the window; sliders don't
-W, H = 400, 660
+RESTYLE = {'theme', 'accent', 'font'}         # redraw the whole window
+REFRESH = {'character', 'style', 'color'}     # redraw the pages that show the character; sliders redraw nothing
+W, H, MIN_H = 400, 660, 360
 DANGER = '#ff6b6b'
+CLOSE_RED = '#c42b1c'  # Windows' own close-button red
 
 
 def shade(hex_color, k):
@@ -35,21 +33,56 @@ def ink(hex_color):
     return '#111111' if 0.299 * r + 0.587 * g + 0.114 * b > 150 else '#ffffff'
 
 
+class Tip:
+    """Small tooltip under a widget after a short hover."""
+
+    def __init__(self, widget, text, panel):
+        self.w, self.text, self.panel, self.tip, self.job = widget, text, panel, None, None
+        widget.bind('<Enter>', self.enter, add='+')
+        widget.bind('<Leave>', self.leave, add='+')
+        widget.bind('<ButtonPress-1>', self.leave, add='+')
+
+    def enter(self, _):
+        self.job = self.w.after(450, self.show)
+
+    def leave(self, _=None):
+        if self.job:
+            self.w.after_cancel(self.job)
+            self.job = None
+        if self.tip:
+            self.tip.destroy()
+            self.tip = None
+
+    def show(self):
+        c = self.panel.c
+        t = self.tip = tk.Toplevel(self.w)
+        t.overrideredirect(True)
+        t.attributes('-topmost', True)
+        tk.Label(t, text=self.text, bg=c['card'], fg=c['text'], font=(self.panel.family, 9), padx=8, pady=3,
+                 highlightthickness=1, highlightbackground=c['hover']).pack()
+        t.update_idletasks()
+        x = self.w.winfo_rootx() + (self.w.winfo_width() - t.winfo_width()) // 2
+        t.geometry(f'+{x}+{self.w.winfo_rooty() + self.w.winfo_height() + 4}')
+
+
 class SettingsWindow:
     def __init__(self, app, core, tab='home'):
         self.app, self.core, self.tab = app, core, tab
         self.open_sections = {'General'}
         self.status = ''        # message on the Characters tab (import result)
-        self.thumbs = {}        # pack name -> small loaded frames, kept for the window's life
+        self.thumbs = {}        # (pack name, px) -> small loaded frames, kept for the window's life
+        self.pages = {}         # tab -> its built page; switching tabs just shows another one, no rebuild
         self.frame = 0
+        self.preview = None
         w = self.win = ctk.CTkToplevel(app.root)
         w.overrideredirect(True)  # our own title bar instead of the white Windows one
         w.attributes('-topmost', True)
         if os.path.exists(core.LOGO):
             w.iconbitmap(core.LOGO)  # also stops CustomTkinter swapping in its own icon
         self.logo = ctk.CTkImage(core.logo_image(64), size=(20, 20))
+        self.k = ctk.ScalingTracker.get_widget_scaling(w)  # display scaling for the plain tk canvases
         w.geometry(f'{W}x{H}')  # CustomTkinter scales this size for the display
-        self.build()
+        self.restyle()
         w.after(400, self.fit_on_screen)  # after CustomTkinter has applied display scaling
 
     def fit_on_screen(self):
@@ -67,15 +100,26 @@ class SettingsWindow:
 
     # --- window chrome ---
     def taskbar_button(self):
-        """Borderless windows get no taskbar button by default; ask Windows for one (WS_EX_APPWINDOW)."""
+        """Borderless windows get no taskbar button or rounded corners by default; ask Windows for both."""
         try:
             hwnd = ctypes.windll.user32.GetParent(self.win.winfo_id())
             style = ctypes.windll.user32.GetWindowLongW(hwnd, -20)
-            ctypes.windll.user32.SetWindowLongW(hwnd, -20, (style & ~0x80) | 0x40000)
+            ctypes.windll.user32.SetWindowLongW(hwnd, -20, (style & ~0x80) | 0x40000)  # WS_EX_APPWINDOW
+            # DWMWA_WINDOW_CORNER_PREFERENCE = 33, DWMWCP_ROUND = 2 (Windows 11; ignored elsewhere)
+            ctypes.windll.dwmapi.DwmSetWindowAttribute(hwnd, 33, ctypes.byref(ctypes.c_int(2)), 4)
             self.win.withdraw()
             self.win.after(10, self.win.deiconify)
-        except tk.TclError:
-            pass  # window closed already
+        except (tk.TclError, OSError, AttributeError):
+            pass  # window closed already, or no DWM
+
+    def grip_press(self, e):
+        self.grip0 = (e.y_root, self.win.winfo_height())
+
+    def grip_drag(self, e):
+        """Bottom edge: change the height only; the content keeps its size and scrolls."""
+        L, T, R, B = self.core.monitor_at()[1]
+        h = max(int(MIN_H * self.k), min(B - self.win.winfo_y(), self.grip0[1] + e.y_root - self.grip0[0]))
+        self.win.geometry(f'{W}x{int(h / self.k)}')
 
     def grab(self, e):
         self.off = (e.x_root - self.win.winfo_x(), e.y_root - self.win.winfo_y())
@@ -103,30 +147,58 @@ class SettingsWindow:
         self.app.quit_if_idle()
 
     def show(self, tab):
+        """Switch tabs: build the page the first time, afterwards just swap which one is visible."""
         self.tab = tab
-        self.build()
+        if tab not in self.pages:
+            self.pages[tab] = self.make_page(tab)
+        for key, page in self.pages.items():
+            if key != tab:
+                page.pack_forget()
+        self.pages[tab].pack(fill='both', expand=True)
+        self.color_tabs()
         self.win.deiconify()
         self.win.lift()
 
+    def make_page(self, tab):
+        self.body = ctk.CTkScrollableFrame(self.win, fg_color=self.c['bg'], corner_radius=0,
+                                           scrollbar_button_color=self.c['card'],
+                                           scrollbar_button_hover_color=self.c['hover'])
+        getattr(self, 'page_' + tab)()
+        return self.body
+
+    def refresh(self):
+        """Settings that pages show changed: rebuild the visible page off-screen and swap it in (no flash);
+        the other pages are dropped and rebuilt when next opened."""
+        old = self.pages
+        self.pages = {self.tab: self.make_page(self.tab)}
+        self.pages[self.tab].pack(fill='both', expand=True)
+        for page in old.values():
+            page.destroy()
+
     # --- building blocks ---
-    def build(self):
+    def restyle(self):
+        """Theme, accent or font changed (or first open): redraw the whole window."""
         s = self.app.settings
         bg, card, acc, text, muted = self.core.THEMES[s['theme']]
         acc = s['accent'] or acc
-        self.c = dict(bg=bg, card=card, acc=acc, text=text, muted=muted, hover=shade(card, 1.25), on_acc=ink(acc))
-        family = s['font'] if s['font'] in tkfont.families(self.app.root) else 'Segoe UI'
-        self.font = lambda size=13, bold=False: ctk.CTkFont(family=family, size=size, weight='bold' if bold else 'normal')
-        ctk.set_appearance_mode('light' if s['theme'] == 'Light' else 'dark')
+        light = s['theme'] == 'Light'
+        self.c = dict(bg=bg, card=card, acc=acc, text=text, muted=muted, hover=shade(card, 1.25), on_acc=ink(acc),
+                      btn_hover=shade(bg, 0.88) if light else shade(bg, 2.1))
+        self.family = s['font'] if s['font'] in tkfont.families(self.app.root) else 'Segoe UI'
+        self.font = lambda size=13, bold=False: ctk.CTkFont(family=self.family, size=size,
+                                                            weight='bold' if bold else 'normal')
+        ctk.set_appearance_mode('light' if light else 'dark')
         for child in self.win.winfo_children():
             child.destroy()
-        self.preview = None
+        self.pages, self.preview = {}, None
         self.win.configure(fg_color=bg)
         self.titlebar()
+        grip = ctk.CTkFrame(self.win, fg_color=card, corner_radius=0, height=5, cursor='sb_v_double_arrow')
+        grip.pack(fill='x', side='bottom')
+        grip.bind('<ButtonPress-1>', self.grip_press)
+        grip.bind('<B1-Motion>', self.grip_drag)
         self.tabbar()
-        self.body = ctk.CTkScrollableFrame(self.win, fg_color=bg, corner_radius=0, scrollbar_button_color=card,
-                                           scrollbar_button_hover_color=self.c['hover'])
-        self.body.pack(fill='both', expand=True)
-        getattr(self, 'page_' + self.tab)()
+        self.show(self.tab)
 
     def titlebar(self):
         c = self.c
@@ -137,9 +209,18 @@ class SettingsWindow:
         title.pack(side='left', padx=(12, 6))
         ver = ctk.CTkLabel(bar, text=f'v{self.core.VERSION}', font=self.font(11), text_color=c['muted'])
         ver.pack(side='left')
-        for icon, cmd in (('', self.close), ('', self.hide), ('', self.minimize)):  # close, eye, minimize
-            ctk.CTkButton(bar, text=icon, width=36, height=28, corner_radius=6, font=ctk.CTkFont(family=ICONS, size=11),
-                          fg_color='transparent', hover_color=c['card'], text_color=c['text'], command=cmd).pack(side='right', padx=1)
+        self.title_buttons = []  # (button, tooltip): close, hide, minimize
+        for icon, cmd, tip in (('', self.close, 'Close'), ('', self.hide, 'Hide to tray'),
+                               ('', self.minimize, 'Minimize')):
+            red = cmd == self.close
+            b = ctk.CTkButton(bar, text=icon, width=36, height=28, corner_radius=6, font=ctk.CTkFont(family=ICONS, size=11),
+                              fg_color='transparent', hover_color=CLOSE_RED if red else c['btn_hover'],
+                              text_color=c['text'], command=cmd)
+            b.pack(side='right', padx=2, pady=4)
+            if red:  # white glyph on the red square
+                b.bind('<Enter>', lambda e, b=b: b.configure(text_color='#ffffff'), add='+')
+                b.bind('<Leave>', lambda e, b=b: b.configure(text_color=c['text']), add='+')
+            self.title_buttons.append((b, Tip(b, tip, self)))
         for w in (bar, title, ver):
             w.bind('<ButtonPress-1>', self.grab)
             w.bind('<B1-Motion>', self.move)
@@ -148,19 +229,27 @@ class SettingsWindow:
         c = self.c
         bar = ctk.CTkFrame(self.win, fg_color=c['card'], corner_radius=0)
         bar.pack(fill='x', side='bottom')
+        self.tab_parts = {}
         for key, icon, name in TABS:
-            on = key == self.tab
-            col = c['acc'] if on else c['muted']
             f = ctk.CTkFrame(bar, fg_color='transparent')
             f.pack(side='left', expand=True, pady=(8, 6))
-            parts = [ctk.CTkLabel(f, text=icon, font=ctk.CTkFont(family=ICONS, size=18), text_color=col, height=24),
-                     ctk.CTkLabel(f, text=name, font=self.font(11, on), text_color=c['text'] if on else c['muted'], height=16),
-                     ctk.CTkFrame(f, fg_color=c['acc'] if on else 'transparent', width=24, height=3, corner_radius=2)]
+            parts = [ctk.CTkLabel(f, text=icon, font=ctk.CTkFont(family=ICONS, size=18), height=24),
+                     ctk.CTkLabel(f, text=name, height=16),
+                     ctk.CTkFrame(f, width=24, height=3, corner_radius=2)]
             for p in parts:
                 p.pack(pady=(0, 2))
             for w in [f] + parts:
                 w.bind('<Button-1>', lambda e, k=key: self.show(k))
                 w.configure(cursor='hand2')
+            self.tab_parts[key] = parts
+
+    def color_tabs(self):
+        c = self.c
+        for key, (icon, name, bar) in self.tab_parts.items():
+            on = key == self.tab
+            icon.configure(text_color=c['acc'] if on else c['muted'])
+            name.configure(text_color=c['text'] if on else c['muted'], font=self.font(11, on))
+            bar.configure(fg_color=c['acc'] if on else c['card'])
 
     def header(self, icon, title, sub, image=None):
         h = ctk.CTkFrame(self.body, fg_color='transparent')
@@ -207,6 +296,7 @@ class SettingsWindow:
         sl.configure(command=moved)  # attached after set(), so opening the window changes nothing
         sl.pack(side='left', padx=6)
         value.pack(side='left')
+        self.sliders[key] = (sl, show)
 
     def switch(self, parent, title, desc, value, command, enabled=True):
         row = ctk.CTkFrame(parent, fg_color='transparent')
@@ -222,57 +312,69 @@ class SettingsWindow:
     def change(self, key, value):
         self.app.settings[key] = value
         self.app.apply()
-        if key in REBUILD:
-            self.build()
+        if key in RESTYLE:
+            self.restyle()
+        elif key in REFRESH:
+            self.refresh()
+        elif key == 'pets':
+            self.update_count()
 
     def animate(self):
         """Preview on the Home tab plays the current character."""
         try:
             if not self.win.winfo_exists():
                 return
-            c = self.preview
-            if c is not None and c.winfo_exists():
+            c, k = self.preview, self.k
+            if c is not None and c.winfo_exists() and c.winfo_ismapped():
                 c.delete('all')
                 if self.app.pack:
-                    self.core.draw_pack(c, self.app.pack, 'idle', 1, self.frame, 124, x=90)
+                    self.core.draw_pack(c, self.app.pack, 'idle', 1, self.frame, int(124 * k), x=int(90 * k))
                 else:
                     s = self.app.settings
                     self.core.draw_blob(c, s['color'], 'idle', 1, self.frame + 50, 0, s['style'])
-                    c.scale('all', 0, 0, 1.9, 1.9)
-                    c.move('all', 29, 2)
+                    c.scale('all', 0, 0, 1.9 * k, 1.9 * k)
+                    c.move('all', 29 * k, 2 * k)
             self.frame += 3
             self.win.after(100, self.animate)
         except tk.TclError:
             pass  # window went away mid-frame
 
+    def canvas(self, parent, w, h, bg):
+        """Plain tk canvas sized for the display scaling (CustomTkinter scales its own widgets, not these)."""
+        return tk.Canvas(parent, width=int(w * self.k), height=int(h * self.k), bg=bg, highlightthickness=0)
+
     def thumb(self, parent, name):
         """40 px picture of a pack (or the blob for name '')."""
-        c = tk.Canvas(parent, width=40, height=40, bg=self.c['hover'], highlightthickness=0)
+        k = self.k
+        c = self.canvas(parent, 40, 40, self.c['hover'])
         if not name:
             s = self.app.settings
             self.core.draw_blob(c, s['color'], f=50, style=s['style'])
-            c.scale('all', 0, 0, 0.6, 0.6)
-            c.move('all', 1, 1)
+            c.scale('all', 0, 0, 0.6 * k, 0.6 * k)
+            c.move('all', k, k)
             return c
-        if name not in self.thumbs:
+        key = (name, int(36 * k))
+        if key not in self.thumbs:
             try:
-                self.thumbs[name] = packs.load_frames(os.path.join(self.core.PACKS_DIR, name), 36)
+                self.thumbs[key] = packs.load_frames(os.path.join(self.core.PACKS_DIR, name), key[1])
             except Exception:
-                self.thumbs[name] = None
-        if self.thumbs[name] and 'idle' in self.thumbs[name][0]:
-            self.core.draw_pack(c, self.thumbs[name], 'idle', 1, 0, 38, x=20)
+                self.thumbs[key] = None
+        if self.thumbs[key] and 'idle' in self.thumbs[key][0]:
+            self.core.draw_pack(c, self.thumbs[key], 'idle', 1, 0, int(38 * k), x=int(20 * k))
         return c
 
     # --- Home ---
     def page_home(self):
         self.header('', 'Desktop Pet', 'Your little desk buddy',
                     ctk.CTkImage(self.core.logo_image(96), size=(32, 32)))
+        self.sliders = {}
         c = self.card()
-        self.preview = tk.Canvas(c, width=180, height=130, bg=self.c['card'], highlightthickness=0, cursor='hand2')
+        self.preview = self.canvas(c, 180, 130, self.c['card'])
+        self.preview.configure(cursor='hand2')
         self.preview.pack(pady=(8, 0))
         self.preview.bind('<Button-1>', lambda e: self.spawn())
-        hint = 'Click to send one out' if len(self.app.pets) < 10 else 'That is all 10 of them!'
-        self.label(c, f'{hint}  ·  {len(self.app.pets)} on your desk', 11, muted=True).pack(pady=(0, 8))
+        self.count = self.label(c, '', 11, muted=True)
+        self.count.pack(pady=(0, 8))
         row = ctk.CTkFrame(self.card(), fg_color='transparent')
         row.pack(fill='x', padx=12, pady=10)
         name = self.app.settings['character']
@@ -290,13 +392,26 @@ class SettingsWindow:
         ctk.CTkFrame(c, height=4, fg_color='transparent').pack()
         self.switch(self.card(), 'Show pets', 'Hide every pet without quitting. The tray icon can bring them back.',
                     self.app.visible, self.app.set_visible)
+        self.update_count()
+
+    def update_count(self):
+        """Home tab's pet count line and Pets slider, updated in place."""
+        try:
+            n = len(self.app.pets)
+            hint = 'Click to send one out' if n < 10 else 'That is all 10 of them!'
+            self.count.configure(text=f'{hint}  ·  {n} on your desk')
+            sl, show = self.sliders['pets']
+            sl.set(n)
+            show(n)
+        except (AttributeError, KeyError, tk.TclError):
+            pass  # Home page not built yet
 
     def spawn(self):
         """Home tab: clicking the character sends a new pet onto the desktop."""
         self.app.add()
         if not self.app.visible:
             self.app.set_visible(True)
-        self.build()  # pet count and slider follow
+        self.update_count()
 
     # --- Characters ---
     def page_characters(self):
@@ -382,7 +497,7 @@ class SettingsWindow:
             self.change('character', name)
         except ValueError as err:
             self.status = f"Couldn't add {os.path.basename(os.path.normpath(path))}: {err}"
-            self.build()
+            self.refresh()
 
     def add_zip(self):
         path = filedialog.askopenfilename(parent=self.win, title='Choose a character pack',
@@ -492,7 +607,7 @@ class SettingsWindow:
 
     def toggle_section(self, name):
         self.open_sections ^= {name}
-        self.build()
+        self.refresh()
 
     def sec_general(self, c):
         self.switch(c, 'Start with Windows', 'Open Desktop Pet automatically when you log in.',
