@@ -8,6 +8,10 @@ import customtkinter as ctk
 
 import packs
 
+# The pets already run at Windows' display scaling; CustomTkinter scaling on top made the window
+# 1.25 x too big and off-centre on a 125% screen.
+ctk.deactivate_automatic_dpi_awareness()
+
 ICONS = 'Segoe Fluent Icons'  # ships with Windows 11
 TABS = (('home', '', 'Home'), ('characters', '', 'Characters'),
         ('customize', '', 'Customize'), ('settings', '', 'Settings'))
@@ -44,9 +48,20 @@ class SettingsWindow:
         if os.path.exists(core.LOGO):
             w.iconbitmap(core.LOGO)  # also stops CustomTkinter swapping in its own icon
         self.logo = ctk.CTkImage(core.logo_image(64), size=(20, 20))
-        L, T, R, B = core.monitor_at()[1]
-        w.geometry(f'{W}x{H}+{L + (R - L - W) // 2}+{T + (B - T - H) // 2}')
+        w.geometry(f'{W}x{H}')  # CustomTkinter scales this size for the display
         self.build()
+        w.after(400, self.fit_on_screen)  # after CustomTkinter has applied display scaling
+
+    def fit_on_screen(self):
+        """Shrink to the screen height if needed (the body scrolls) and centre on the main screen."""
+        w = self.win
+        L, T, R, B = self.core.monitor_at()[1]
+        w.update_idletasks()
+        if w.winfo_height() > B - T - 20:
+            w.geometry(f'{W}x{int((B - T - 40) / ctk.ScalingTracker.get_window_scaling(w))}')
+            w.update_idletasks()
+        # straight to Tk: CustomTkinter's geometry() would scale the position as well
+        tk.Wm.wm_geometry(w, f'+{L + (R - L - w.winfo_width()) // 2}+{T + (B - T - w.winfo_height()) // 2}')
         w.after(50, self.taskbar_button)
         self.animate()
 
@@ -66,7 +81,7 @@ class SettingsWindow:
         self.off = (e.x_root - self.win.winfo_x(), e.y_root - self.win.winfo_y())
 
     def move(self, e):
-        self.win.geometry(f'+{e.x_root - self.off[0]}+{e.y_root - self.off[1]}')
+        tk.Wm.wm_geometry(self.win, f'+{e.x_root - self.off[0]}+{e.y_root - self.off[1]}')  # unscaled, see __init__
 
     def minimize(self):
         self.win.overrideredirect(False)  # Windows can only minimize a window with a frame
@@ -85,6 +100,7 @@ class SettingsWindow:
     def close(self):
         self.win.destroy()
         self.app.panel = None
+        self.app.quit_if_idle()
 
     def show(self, tab):
         self.tab = tab
@@ -251,8 +267,12 @@ class SettingsWindow:
     def page_home(self):
         self.header('', 'Desktop Pet', 'Your little desk buddy',
                     ctk.CTkImage(self.core.logo_image(96), size=(32, 32)))
-        self.preview = tk.Canvas(self.card(), width=180, height=130, bg=self.c['card'], highlightthickness=0)
-        self.preview.pack(pady=8)
+        c = self.card()
+        self.preview = tk.Canvas(c, width=180, height=130, bg=self.c['card'], highlightthickness=0, cursor='hand2')
+        self.preview.pack(pady=(8, 0))
+        self.preview.bind('<Button-1>', lambda e: self.spawn())
+        hint = 'Click to send one out' if len(self.app.pets) < 10 else 'That is all 10 of them!'
+        self.label(c, f'{hint}  ·  {len(self.app.pets)} on your desk', 11, muted=True).pack(pady=(0, 8))
         row = ctk.CTkFrame(self.card(), fg_color='transparent')
         row.pack(fill='x', padx=12, pady=10)
         name = self.app.settings['character']
@@ -266,10 +286,17 @@ class SettingsWindow:
         ctk.CTkFrame(c, height=4, fg_color='transparent').pack()
         self.slider(c, 'speed', 'Speed', 0.5, 3, 25)
         self.slider(c, 'size', 'Size', 0.5, 2.5, 20)
-        self.slider(c, 'pets', 'Pets', 1, 10, 9)
+        self.slider(c, 'pets', 'Pets', 0, 10, 10)
         ctk.CTkFrame(c, height=4, fg_color='transparent').pack()
         self.switch(self.card(), 'Show pets', 'Hide every pet without quitting. The tray icon can bring them back.',
                     self.app.visible, self.app.set_visible)
+
+    def spawn(self):
+        """Home tab: clicking the character sends a new pet onto the desktop."""
+        self.app.add()
+        if not self.app.visible:
+            self.app.set_visible(True)
+        self.build()  # pet count and slider follow
 
     # --- Characters ---
     def page_characters(self):
