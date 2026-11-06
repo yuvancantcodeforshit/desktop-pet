@@ -32,6 +32,27 @@ Or use the developer panel: `pythonw dev.py` (buttons for release, selftest, run
 Selftest, version bump, build, commit + push, GitHub release — one command.
 Needs Python with `pyinstaller` and the GitHub CLI signed in once (`gh auth login`).
 
+## Code signing
+
+Unsigned exes get blocked by Windows **Smart App Control** and warned about by SmartScreen.
+`release.ps1` signs both exes automatically once `signing\metadata.json` exists. One-time setup
+(individuals must live in the US or Canada; Microsoft bills from the moment the account is created):
+
+1. Azure account with a pay-as-you-go subscription, billing account type **Individual**,
+   legal name + address exactly as on your government ID.
+2. Azure portal > create an **Artifact Signing account** (Basic tier). Note its region endpoint
+   (e.g. East US = `https://eus.codesigning.azure.net`).
+3. On that account > Access control (IAM): give yourself **Artifact Signing Identity Verifier** and
+   **Artifact Signing Certificate Profile Signer**.
+4. Identity validation > New identity > Individual. Takes 1–20 business days.
+5. Certificate profiles > create a **Public Trust** profile.
+6. On this PC: `winget install -e --id Microsoft.Azure.ArtifactSigningClientTools`,
+   `winget install -e --id Microsoft.AzureCLI`, then `az login`.
+7. Copy `signing\metadata.example.json` to `signing\metadata.json` and fill in the endpoint,
+   account and profile names. (It's git-ignored.)
+
+Then `.\release.ps1 <version>` signs, tests and publishes as usual.
+
 ## Files
 
 | File | What it is |

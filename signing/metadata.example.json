@@ -1,0 +1,5 @@
+{
+  "Endpoint": "https://eus.codesigning.azure.net",
+  "CodeSigningAccountName": "your-artifact-signing-account",
+  "CertificateProfileName": "your-certificate-profile"
+}
