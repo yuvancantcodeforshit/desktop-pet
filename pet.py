@@ -170,6 +170,56 @@ def all_monitors():
     return sorted(found, key=lambda m: m != primary)
 
 
+# --- smooth pet windows ---
+# A pet window shows a 32-bit picture with real per-pixel transparency (UpdateLayeredWindow).
+# The old way (-transparentcolor) could only make pixels fully clear or fully solid: jagged edges.
+class BITMAPINFOHEADER(ctypes.Structure):
+    _fields_ = [('biSize', ctypes.wintypes.DWORD), ('biWidth', ctypes.wintypes.LONG), ('biHeight', ctypes.wintypes.LONG),
+                ('biPlanes', ctypes.wintypes.WORD), ('biBitCount', ctypes.wintypes.WORD),
+                ('biCompression', ctypes.wintypes.DWORD), ('biSizeImage', ctypes.wintypes.DWORD),
+                ('biXPelsPerMeter', ctypes.wintypes.LONG), ('biYPelsPerMeter', ctypes.wintypes.LONG),
+                ('biClrUsed', ctypes.wintypes.DWORD), ('biClrImportant', ctypes.wintypes.DWORD)]
+
+
+class BLENDFUNCTION(ctypes.Structure):
+    _fields_ = [('BlendOp', ctypes.c_ubyte), ('BlendFlags', ctypes.c_ubyte),
+                ('SourceConstantAlpha', ctypes.c_ubyte), ('AlphaFormat', ctypes.c_ubyte)]
+
+
+gdi32 = ctypes.windll.gdi32
+_vp = ctypes.c_void_p  # handles are pointer-sized; ctypes' default int would cut them in half on 64-bit
+user32.GetParent.restype = user32.GetDC.restype = _vp
+user32.GetParent.argtypes = user32.GetDC.argtypes = [_vp]
+user32.ReleaseDC.argtypes = [_vp, _vp]
+user32.GetWindowLongW.argtypes = [_vp, ctypes.c_int]
+user32.SetWindowLongW.argtypes = [_vp, ctypes.c_int, ctypes.c_long]
+user32.UpdateLayeredWindow.argtypes = [_vp, _vp, _vp, _vp, _vp, _vp, ctypes.wintypes.DWORD, _vp, ctypes.wintypes.DWORD]
+gdi32.CreateCompatibleDC.restype = gdi32.CreateDIBSection.restype = gdi32.SelectObject.restype = _vp
+gdi32.CreateCompatibleDC.argtypes = [_vp]
+gdi32.CreateDIBSection.argtypes = [_vp, _vp, ctypes.c_uint, ctypes.POINTER(_vp), _vp, ctypes.wintypes.DWORD]
+gdi32.SelectObject.argtypes = [_vp, _vp]
+gdi32.DeleteObject.argtypes = gdi32.DeleteDC.argtypes = [_vp]
+
+
+def show_layered(hwnd, data, w, h):
+    """Put w x h premultiplied BGRA bytes on a layered window."""
+    screen = user32.GetDC(None)
+    mem = gdi32.CreateCompatibleDC(screen)
+    bits = _vp()
+    bmp = gdi32.CreateDIBSection(screen, ctypes.byref(BITMAPINFOHEADER(ctypes.sizeof(BITMAPINFOHEADER), w, -h, 1, 32)),
+                                 0, ctypes.byref(bits), None, 0)
+    if bmp and bits:
+        ctypes.memmove(bits, data, len(data))
+        old = gdi32.SelectObject(mem, bmp)
+        user32.UpdateLayeredWindow(hwnd, screen, None, ctypes.byref(ctypes.wintypes.SIZE(w, h)), mem,
+                                   ctypes.byref(ctypes.wintypes.POINT(0, 0)), 0,
+                                   ctypes.byref(BLENDFUNCTION(0, 0, 255, 1)), 2)  # AC_SRC_ALPHA, ULW_ALPHA
+        gdi32.SelectObject(mem, old)
+        gdi32.DeleteObject(bmp)
+    gdi32.DeleteDC(mem)
+    user32.ReleaseDC(None, screen)
+
+
 # --- updates ---
 def newer(a, b):
     """True if version string a is newer than b."""
@@ -247,12 +297,10 @@ def single_instance():
 class Pet:
     def __init__(self, app):
         self.app, self.alive = app, True
-        w = self.win = tk.Toplevel(app.root)
+        w = self.win = tk.Toplevel(app.root, cursor='hand2')
         w.overrideredirect(True)
         w.attributes('-topmost', True)
-        w.attributes('-transparentcolor', KEY)
-        self.cv = tk.Canvas(w, bg=KEY, highlightthickness=0, cursor='hand2')
-        self.cv.pack()
+        self.hwnd, self.shown = None, {}  # layered window handle; picture -> its prepared bytes
         self.resize()
         self.area = L, T, R, B = random.choice(app.allowed_areas())  # start on a monitor allowed in Settings
         self.x, self.y = random.randint(L, max(L, R - self.px)), T
@@ -260,10 +308,10 @@ class Pet:
         self.dir = random.choice((-1, 1))
         self.frame = 0
         self.set('fall')
-        self.cv.bind('<ButtonPress-1>', self.grab)
-        self.cv.bind('<B1-Motion>', self.drag)
-        self.cv.bind('<ButtonRelease-1>', self.drop)
-        self.cv.bind('<Button-3>', self.menu)
+        w.bind('<ButtonPress-1>', self.grab)
+        w.bind('<B1-Motion>', self.drag)
+        w.bind('<ButtonRelease-1>', self.drop)
+        w.bind('<Button-3>', self.menu)
         if not app.visible:
             w.withdraw()
         self.tick()
@@ -273,7 +321,8 @@ class Pet:
 
     def resize(self):
         self.px = int(pet_px(self.app.settings) * (self.app.pack_scale if self.app.pack else 1))
-        self.cv.config(width=self.px, height=self.px)
+        self.win.geometry(f'{self.px}x{self.px}')
+        self.shown.clear()
 
     # --- mouse ---
     def grab(self, e):
@@ -337,9 +386,19 @@ class Pet:
                     self.dir = -self.dir
         elif s == 'climb':
             self.y -= 2 * speed
-            if self.y <= T or self.timer <= 0:  # let go, hop away from the wall
-                self.y = max(T, self.y)
+            if self.y <= T:  # reached the top: grab the top edge and swing along it, away from the wall
+                self.y, self.dir = T, -self.dir
+                self.set('ceiling')
+            elif self.timer <= 0 and random.random() < 0.004:  # now and then a tired climber lets go
                 self.vx, self.vy = -self.dir * 3, -4
+                self.set('fall')
+        elif s == 'ceiling':  # monkey bars across the top of the screen
+            self.y = T
+            self.x += 1.5 * speed * self.dir
+            if not L <= self.x <= R - px:  # reached the far side: drop down
+                self.x = max(L, min(R - px, self.x))
+                self.set('fall')
+            elif self.timer <= 0 and random.random() < 0.006:
                 self.set('fall')
         if s in ('walk', 'idle', 'sit') and self.timer <= 0:
             self.set(random.choice(('walk', 'walk', 'idle', 'sit')))
@@ -355,17 +414,38 @@ class Pet:
         self.draw()
         self.win.after(33, self.tick)
 
-    def draw(self):
-        c, d, f, s = self.cv, self.dir, self.frame, self.state
-        c.delete('all')
+    def picture(self):
+        """This tick's PIL picture of the pet."""
+        d, f, s = self.dir, self.frame, self.state
         if self.app.pack:  # character pack: that state's animation, mirrored when facing left
-            draw_pack(c, self.app.pack, s, d, f, self.px)
-            return
-        moving = s in ('walk', 'climb')
-        step = 3 if moving and f // 5 % 2 else 0
-        draw_blob(c, self.app.settings['color'], s, d, f, step, self.app.settings['style'])
-        if self.px != SIZE:  # drawn at 64 px, then scaled to the size setting
-            c.scale('all', 0, 0, self.px / SIZE, self.px / SIZE)
+            frames, fps = self.app.pack
+            right, left = frames.get(s) or (s == 'ceiling' and frames.get('drag')) or frames['idle']
+            seq = left if d < 0 else right
+            return seq[int(f * fps / 30) % len(seq)]
+        step = 3 if s in ('walk', 'climb', 'ceiling') and f // 5 % 2 else 0
+        blink = f % 100 < 4 or s == 'sit' and f % 200 < 100
+        st = self.app.settings
+        return self.app.blob_frame(s, 1 if d > 0 else -1, step, blink, st['style'], st['color'], self.px)
+
+    def draw(self):
+        if self.hwnd is None:
+            self.win.update_idletasks()
+            self.hwnd = user32.GetParent(self.win.winfo_id())  # the real window around Tk's frame
+            ex = user32.GetWindowLongW(self.hwnd, -20)
+            user32.SetWindowLongW(self.hwnd, -20, ex | 0x80000 | 0x80)  # WS_EX_LAYERED, WS_EX_TOOLWINDOW
+        img = self.picture()
+        top = self.state == 'ceiling'  # hanging: picture hugs the top edge, not the floor
+        key = (id(img), top)
+        data = self.shown.get(key)
+        if data is None:
+            from PIL import Image
+            canvas = Image.new('RGBA', (self.px, self.px), (0, 0, 0, 0))
+            canvas.alpha_composite(img, ((self.px - img.width) // 2, 0 if top else self.px - img.height))
+            data = canvas.convert('RGBa').tobytes('raw', 'BGRa')  # premultiplied, as Windows wants
+            if len(self.shown) > 600:
+                self.shown.clear()
+            self.shown[key] = data
+        show_layered(self.hwnd, data, self.px, self.px)
 
 
 def pet_px(settings):
@@ -428,7 +508,10 @@ def blob_image(size, color, style='Blob', f=50):
 def draw_blob(c, color, s='idle', d=1, f=0, step=0, style='Blob'):
     """The default pet at 64 px on canvas c: state s, facing d (-1/1), animation frame f, foot step offset,
     style one of BLOB_STYLES (ears, ghost tail)."""
-    top = 26 if s == 'sit' else 14 + (2 if step else 0)
+    top = 26 if s == 'sit' else 20 if s == 'ceiling' else 14 + (2 if step else 0)
+    if s == 'ceiling':  # hanging from the top edge: arms up, one hand forward per step
+        c.create_line(24, top + 8, 22 + step, 0, fill=LINE, width=3)
+        c.create_line(40, top + 8, 42 - step, 0, fill=LINE, width=3)
     if style == 'Cat':  # ears behind the body
         for x0, x1, x2 in ((12, 18, 28), (36, 46, 52)):
             c.create_polygon(x0, top + 10, x1, top - 8, x2, top + 2, fill=color, outline=LINE, width=2)
@@ -445,7 +528,7 @@ def draw_blob(c, color, s='idle', d=1, f=0, step=0, style='Blob'):
             c.create_oval(x, 46 - step, x + 16, 60 - step, fill=color, outline='')
     else:
         # feet (dangle while dragged)
-        fy = 52 if s != 'drag' else 56
+        fy = 56 if s in ('drag', 'ceiling') else 52
         c.create_oval(16, fy - step, 28, fy + 8 - step, fill=LINE, outline='')
         c.create_oval(36, fy - 3 + step, 48, fy + 5 + step, fill=LINE, outline='')
         # body
@@ -488,6 +571,7 @@ class App:
         except Exception:
             self.dnd = False
         self.settings = load_settings()
+        self.blob_cache = {}
         self.migrate_character()
         self.load_character()
         self.pets = []
@@ -567,7 +651,7 @@ class App:
         self.pack_key, self.pack = key, None
         if name and os.path.isdir(path):
             try:
-                self.pack = packs.load_frames(path, int(pet_px(self.settings) * self.pack_scale))
+                self.pack = packs.load_frames(path, int(pet_px(self.settings) * self.pack_scale), pil=True)
             except Exception:
                 self.pack = None  # broken pack: fall back to the blob rather than crash the pets
             if self.pack and 'idle' not in self.pack[0]:
@@ -585,6 +669,18 @@ class App:
             self.add(save=False)
         while len(self.pets) > target:
             self.remove(self.pets[-1])
+
+    def blob_frame(self, s, d, step, blink, style, color, px):
+        """Smooth picture of the default pet for one pose, drawn once and reused."""
+        key = (s, d, step, blink, style, color, px)
+        img = self.blob_cache.get(key)
+        if img is None:
+            pc = PilCanvas(px)
+            draw_blob(pc, color, s, d, 0 if blink else 150, step, style)  # f=0 blinks, f=150 eyes open
+            if len(self.blob_cache) > 300:
+                self.blob_cache.clear()
+            img = self.blob_cache[key] = pc.image()
+        return img
 
     def set_visible(self, on):
         self.visible = on
@@ -767,6 +863,14 @@ def selftest():
         p.x, p.state, p.dir = R - p.px, 'walk', 1  # walk into right wall
         p.step()
         assert p.state == 'climb' or p.dir == -1
+        p.x, p.y, p.state, p.dir = R - p.px, T + 6, 'climb', 1  # climbing the right wall, nearly at the top
+        for _ in range(5):
+            p.step()
+        assert p.state == 'ceiling' and p.dir == -1 and p.y == T, (p.state, p.dir, p.y)
+        p.draw()  # hanging picture hugs the top
+        p.timer, p.x = 10 ** 6, L + 1  # monkey-barred all the way across
+        p.step()
+        assert p.state == 'fall'
         for style in BLOB_STYLES:
             app.settings['style'] = style
             p.draw()
