@@ -20,6 +20,7 @@ REFRESH = {'character', 'style', 'color'}     # redraw the pages that show the c
 W, H, MIN_H = 460, 660, 360  # width is fixed; only the height can be dragged
 DANGER = '#ff6b6b'
 CLOSE_RED = '#c42b1c'  # Windows' own close-button red
+TIP_KEY = '#010204'    # colour made see-through around tooltip pills
 
 
 def shade(hex_color, k):
@@ -55,11 +56,12 @@ class Tip:
 
     def show(self):
         c = self.panel.c
-        t = self.tip = tk.Toplevel(self.w)
+        t = self.tip = tk.Toplevel(self.w, bg=TIP_KEY)
         t.overrideredirect(True)
         t.attributes('-topmost', True)
-        tk.Label(t, text=self.text, bg=c['card'], fg=c['text'], font=(self.panel.family, 9), padx=8, pady=3,
-                 highlightthickness=1, highlightbackground=c['hover']).pack()
+        t.attributes('-transparentcolor', TIP_KEY)  # see-through corners around the rounded pill
+        ctk.CTkLabel(t, text=self.text, fg_color=c['tip'], bg_color=TIP_KEY, text_color='#f2f2f2', corner_radius=8,
+                     font=ctk.CTkFont(family=self.panel.family, size=11), height=24, padx=10).pack()
         t.update_idletasks()
         x = self.w.winfo_rootx() + (self.w.winfo_width() - t.winfo_width()) // 2
         t.geometry(f'+{x}+{self.w.winfo_rooty() + self.w.winfo_height() + 4}')
@@ -69,6 +71,7 @@ class SettingsWindow:
     def __init__(self, app, core, tab='home'):
         self.app, self.core, self.tab = app, core, tab
         self.open_sections = {'General'}
+        self.subtab = {}        # page -> chosen sub-tab (Characters / Customize)
         self.status = ''        # message on the Characters tab (import result)
         self.thumbs = {}        # (pack name, px) -> small loaded frames, kept for the window's life
         self.pages = {}         # tab -> its built page; switching tabs just shows another one, no rebuild
@@ -197,7 +200,8 @@ class SettingsWindow:
         acc = s['accent'] or acc
         light = s['theme'] == 'Light'
         self.c = dict(bg=bg, card=card, acc=acc, text=text, muted=muted, hover=shade(card, 1.25), on_acc=ink(acc),
-                      btn_hover=shade(bg, 0.88) if light else shade(bg, 2.1))
+                      btn_hover=shade(bg, 0.88) if light else shade(bg, 2.1),
+                      tip='#3a3a3a' if light else shade(card, 1.45))
         self.family = s['font'] if s['font'] in tkfont.families(self.app.root) else 'Segoe UI'
         self.font = lambda size=13, bold=False: ctk.CTkFont(family=self.family, size=size,
                                                             weight='bold' if bold else 'normal')
@@ -224,17 +228,18 @@ class SettingsWindow:
         title = ctk.CTkLabel(bar, text=' Desktop Pet', image=self.logo, compound='left', font=self.font(13, True),
                              text_color=c['text'])
         title.pack(side='left', padx=(12, 6))
-        ver = ctk.CTkLabel(bar, text=f'v{self.core.VERSION}', font=self.font(11), text_color=c['muted'])
+        ver = ctk.CTkLabel(bar, text=f'v{self.core.VERSION}', font=self.font(10), text_color=c['muted'],
+                           fg_color=c['card'], corner_radius=6, height=20, padx=6)  # small rounded badge
         ver.pack(side='left')
         self.title_buttons = []  # (button, tooltip): close, hide, minimize
         for icon, cmd, tip in (('', self.close, 'Close'), ('', self.hide, 'Hide to tray'),
                                ('', self.minimize, 'Minimize')):
             red = cmd == self.close
-            b = ctk.CTkButton(bar, text=icon, width=36, height=28, corner_radius=6, font=ctk.CTkFont(family=ICONS, size=11),
+            b = ctk.CTkButton(bar, text=icon, width=30, height=30, corner_radius=15, font=ctk.CTkFont(family=ICONS, size=11),
                               fg_color='transparent', hover_color=c['btn_hover'], hover=not red,
                               text_color=c['text'], command=cmd)
             b.pack(side='right', padx=2, pady=4)
-            if red:  # red square + white glyph drawn by hand: changing the glyph colour would wipe CTk's own hover
+            if red:  # red circle + white glyph drawn by hand: changing the glyph colour would wipe CTk's own hover
                 b.bind('<Enter>', lambda e, b=b: b.configure(fg_color=CLOSE_RED, text_color='#ffffff'), add='+')
                 b.bind('<Leave>', lambda e, b=b: b.configure(fg_color='transparent', text_color=c['text']), add='+')
             self.title_buttons.append((b, Tip(b, tip, self)))
@@ -271,9 +276,12 @@ class SettingsWindow:
     def header(self, icon, title, sub, image=None):
         h = ctk.CTkFrame(self.body, fg_color='transparent')
         h.pack(fill='x', padx=14, pady=(10, 8))
-        ctk.CTkLabel(h, text='' if image else icon, image=image, font=ctk.CTkFont(family=ICONS, size=22),
-                     text_color=self.c['text'], width=46, height=46, fg_color=self.c['card'],
-                     corner_radius=12).pack(side='left')
+        circle = ctk.CTkFrame(h, width=48, height=48, corner_radius=24, fg_color=self.c['card'])
+        circle.pack(side='left')
+        circle.pack_propagate(False)  # stay a circle; a label this round would pad itself wider
+        ctk.CTkLabel(circle, text='' if image else icon, image=image, font=ctk.CTkFont(family=ICONS, size=20),
+                     text_color=self.c['text'], fg_color='transparent', width=30, height=30).place(relx=0.5, rely=0.5,
+                                                                                               anchor='center')
         t = ctk.CTkFrame(h, fg_color='transparent')
         t.pack(side='left', padx=12)
         self.label(t, title, 18, True).pack(anchor='w')
@@ -471,25 +479,78 @@ class SettingsWindow:
 
     # --- Characters ---
     def page_characters(self):
-        self.header('', 'Characters', 'Pick who lives on your desk')
-        row = ctk.CTkFrame(self.body, fg_color='transparent')
-        row.pack(fill='x', padx=14, pady=(0, 4))
+        self.header('\uE716', 'Characters', 'Pick who lives on your desk')
+        self.subtabs('characters', (('Characters', '\uE716', self.sub_packs), ('Blob look', '\uE790', self.sub_blob)))
+        if self.app.dnd:
+            self.drop_targets(self.body)
+
+    def subtabs(self, page, tabs):
+        """Folder-style tabs: the chosen one has the panel's colour and joins onto it."""
+        current = self.subtab.setdefault(page, tabs[0][0])
+        bar = ctk.CTkFrame(self.body, fg_color='transparent')
+        bar.pack(fill='x', padx=14, pady=(0, 0))
+        for name, icon, _ in tabs:
+            on = name == current
+            col = self.c['card'] if on else 'transparent'
+            t = ctk.CTkFrame(bar, fg_color=col, corner_radius=10, height=38)
+            t.pack(side='left', padx=(0, 4))
+            parts = [ctk.CTkLabel(t, text=icon, font=ctk.CTkFont(family=ICONS, size=13), width=20,
+                                  text_color=self.c['text'] if on else self.c['muted']),
+                     self.label(t, name, 12, on, muted=not on)]
+            parts[0].pack(side='left', padx=(12, 4), pady=8)
+            parts[1].pack(side='left', padx=(0, 14))
+            if on:  # square off the bottom corners so the tab runs straight into the panel
+                ctk.CTkFrame(t, fg_color=col, corner_radius=0, height=10).place(relx=0, rely=1, relwidth=1, anchor='sw')
+            for w in [t] + parts:
+                w.bind('<Button-1>', lambda e, n=name: self.pick_subtab(page, n))
+                w.configure(cursor='hand2')
+        panel = ctk.CTkFrame(self.body, fg_color=self.c['card'], corner_radius=12)
+        panel.pack(fill='x', padx=14, pady=(0, 6))
+        dict((n, f) for n, _, f in tabs)[current](panel)
+
+    def pick_subtab(self, page, name):
+        if self.subtab.get(page) != name:
+            self.subtab[page] = name
+            self.refresh()
+
+    def hoverable(self, frame, widgets, hot):
+        """Light up a row while the pointer is anywhere over it (moving onto a child must not flicker it off)."""
+        def leave(_):
+            x, y = frame.winfo_pointerxy()
+            w = frame.winfo_containing(x, y)
+            while w is not None and w is not frame:
+                w = w.master
+            if w is None:
+                frame.configure(fg_color='transparent')
+        for w in widgets:
+            w.bind('<Enter>', lambda e: frame.configure(fg_color=hot), add='+')
+            w.bind('<Leave>', leave, add='+')
+
+    def square_button(self, parent, icon, command, color=None):
+        """Small icon button on its own dark square, like the row buttons in Mechvibes."""
+        base = shade(self.c['card'], 0.78) if self.app.settings['theme'] != 'Light' else shade(self.c['card'], 0.92)
+        return ctk.CTkButton(parent, text=icon, width=32, height=28, corner_radius=8,
+                             font=ctk.CTkFont(family=ICONS, size=12), fg_color=base, hover_color=shade(base, 1.6),
+                             text_color=color or self.c['text'], command=command)
+
+    def sub_packs(self, c):
+        row = ctk.CTkFrame(c, fg_color='transparent')
+        row.pack(fill='x', padx=10, pady=(12, 4))
         self.button(row, '+ Add .zip', self.add_zip, primary=True, width=96).pack(side='left')
         self.button(row, 'Add folder', self.add_folder, width=90).pack(side='left', padx=6)
         self.button(row, 'Open folder', self.open_packs, width=96).pack(side='left')
         hint = 'Drop a pack folder or .zip anywhere on this tab.' if self.app.dnd else 'Drag and drop needs tkinterdnd2.'
-        self.label(self.body, self.status or hint, 11, muted=not self.status, color=self.c['acc']).pack(anchor='w', padx=16)
-
-        c = self.card()
+        self.label(c, self.status or hint, 11, muted=not self.status, color=self.c['acc']).pack(anchor='w', padx=12, pady=(0, 6))
         current = self.app.settings['character'] if self.app.pack else ''
-        entries = [('', 'Default blob', 'Built in · style and color below')]
+        entries = [('', 'Default blob', 'Built in \u00b7 change its look in Blob look')]
         entries += [(n, m.get('name') if isinstance(m.get('name'), str) else n,
                      f"by {m['author']}" if isinstance(m.get('author'), str) else 'Character pack')
                     for n, m in packs.list_packs(self.core.PACKS_DIR)]
+        hot = shade(self.c['card'], 1.15)
         for name, title, sub in entries:
             active = name == current
             r = ctk.CTkFrame(c, fg_color=self.c['hover'] if active else 'transparent', corner_radius=10)
-            r.pack(fill='x', padx=6, pady=3)
+            r.pack(fill='x', padx=6, pady=2)
             parts = [self.thumb(r, name)]
             parts[0].pack(side='left', padx=8, pady=6)
             t = ctk.CTkFrame(r, fg_color='transparent')
@@ -498,35 +559,36 @@ class SettingsWindow:
             parts[2].pack(anchor='w')
             parts[3].pack(anchor='w')
             if name:
-                ctk.CTkButton(r, text='', width=32, height=28, font=ctk.CTkFont(family=ICONS, size=13),
-                              fg_color='transparent', hover_color=self.c['card'], text_color=DANGER,
-                              command=lambda n=name: self.delete(n)).pack(side='right', padx=6)
+                path = os.path.join(self.core.PACKS_DIR, name)
+                self.square_button(r, '\uE74D', lambda n=name: self.delete(n), DANGER).pack(side='right', padx=(4, 8))
+                self.square_button(r, '\uE838', lambda p=path: os.startfile(p)).pack(side='right')
             if active:
-                self.label(r, '', color=self.c['acc'], font=ctk.CTkFont(family=ICONS, size=15)).pack(side='right', padx=6)
+                self.label(r, '\uE73E', color=self.c['acc'], font=ctk.CTkFont(family=ICONS, size=15)).pack(side='right', padx=8)
+            else:
+                self.hoverable(r, [r] + parts, hot)
             for w in [r] + parts:
                 w.bind('<Button-1>', lambda e, n=name: self.change('character', n))
+        ctk.CTkFrame(c, height=6, fg_color='transparent').pack()
 
-        c = self.card()
-        self.label(c, 'Default blob look', 13, True).pack(anchor='w', padx=12, pady=(10, 4))
+    def sub_blob(self, c):
         row = ctk.CTkFrame(c, fg_color='transparent')
-        row.pack(fill='x', padx=12)
+        row.pack(fill='x', padx=12, pady=(12, 0))
         self.label(row, 'Style', width=60, anchor='w').pack(side='left')
         ctk.CTkOptionMenu(row, values=list(self.core.BLOB_STYLES), command=lambda v: self.change('style', v),
                           fg_color=self.c['hover'], button_color=self.c['hover'], button_hover_color=self.c['acc'],
                           text_color=self.c['text'], font=self.font(12), dropdown_font=self.font(12),
                           variable=tk.StringVar(value=self.app.settings['style'])).pack(side='left')
+        self.label(c, 'Color', 13, True).pack(anchor='w', padx=12, pady=(12, 0))
         grid = ctk.CTkFrame(c, fg_color='transparent')
         grid.pack(padx=8, pady=8)
         for i, (n, col) in enumerate(COLORS):
             on = col == self.app.settings['color']
-            b = ctk.CTkButton(grid, text=n, width=104, height=30, corner_radius=8, font=self.font(12), anchor='w',
+            b = ctk.CTkButton(grid, text=n, width=124, height=30, corner_radius=8, font=self.font(12), anchor='w',
                               fg_color=self.c['hover'], hover_color=shade(self.c['hover'], 1.2), text_color=self.c['text'],
                               border_width=2 if on else 0, border_color=self.c['acc'],
                               image=self.dot(col), compound='left', command=lambda v=col: self.change('color', v))
             b.grid(row=i // 3, column=i % 3, padx=3, pady=3)
         self.button(c, 'Custom color...', self.pick_color).pack(anchor='w', padx=12, pady=(0, 12))
-        if self.app.dnd:
-            self.drop_targets(self.body)
 
     def dot(self, color):
         from PIL import Image, ImageDraw
@@ -585,19 +647,22 @@ class SettingsWindow:
 
     # --- Customize ---
     def page_customize(self):
-        self.header('', 'Customize', 'Make this window yours')
-        c = self.card()
-        self.label(c, 'Themes', 13, True).pack(anchor='w', padx=12, pady=(10, 4))
+        self.header('\uE790', 'Customize', 'Make this window yours')
+        self.subtabs('customize', (('Themes', '\uE771', self.sub_themes), ('Colors', '\uE790', self.sub_accent),
+                                   ('Font', '\uE8D2', self.sub_font)))
+
+    def sub_themes(self, c):
+        self.label(c, 'A theme sets the whole look. Change its accent in Colors.', 11, muted=True).pack(anchor='w', padx=12, pady=(12, 4))
         grid = ctk.CTkFrame(c, fg_color='transparent')
         grid.pack(padx=8, pady=(0, 10))
         for i, (name, (tbg, tcard, tacc, ttext, _)) in enumerate(self.core.THEMES.items()):
             on = name == self.app.settings['theme']
-            tile = ctk.CTkFrame(grid, fg_color=tbg, corner_radius=10, width=165, height=64,
+            tile = ctk.CTkFrame(grid, fg_color=tbg, corner_radius=10, width=190, height=70,
                                 border_width=2, border_color=self.c['acc'] if on else tcard)
             tile.grid(row=i // 2, column=i % 2, padx=4, pady=4)
             tile.pack_propagate(False)
             bar = ctk.CTkFrame(tile, fg_color=tcard, corner_radius=6, height=14)
-            bar.pack(fill='x', padx=10, pady=(10, 6))
+            bar.pack(fill='x', padx=(10, 40), pady=(12, 6))
             low = ctk.CTkFrame(tile, fg_color='transparent')
             low.pack(fill='x', padx=10)
             parts = [bar, low, ctk.CTkLabel(low, text=name, font=self.font(12, True), text_color=ttext, height=18),
@@ -607,24 +672,49 @@ class SettingsWindow:
             for w in [tile] + parts:
                 w.bind('<Button-1>', lambda e, n=name: self.set_theme(n))
                 w.configure(cursor='hand2')
+            light = name == 'Light'
+            normal, hot = self.dots_image(shade(tbg, 0.8 if light else 1.9), ttext), \
+                self.dots_image(shade(tbg, 0.68 if light else 2.6), ttext)
+            more = ctk.CTkLabel(tile, text='', image=normal, fg_color='transparent', width=24, height=24, cursor='hand2')
+            more.place(relx=1, x=-8, y=8, anchor='ne')
+            more.bind('<Enter>', lambda e, m=more, i=hot: m.configure(image=i))
+            more.bind('<Leave>', lambda e, m=more, i=normal: m.configure(image=i))
+            more.bind('<Button-1>', lambda e, n=name, m=more: self.theme_menu(n, m))
 
-        c = self.card()
-        self.label(c, 'Accent color', 13, True).pack(anchor='w', padx=12, pady=(10, 2))
+    def dots_image(self, fill, dot):
+        """Round '...' button picture (a real circle; a CTk button this small pads itself into a pill)."""
+        from PIL import Image, ImageDraw
+        img = Image.new('RGBA', (96, 96), (0, 0, 0, 0))
+        d = ImageDraw.Draw(img)
+        d.ellipse((0, 0, 95, 95), fill=fill)
+        for x in (28, 48, 68):
+            d.ellipse((x - 6, 42, x + 6, 54), fill=dot)
+        return ctk.CTkImage(img, size=(24, 24))
+
+    def theme_menu(self, name, button):
+        """The round ... button on a theme card."""
+        m = tk.Menu(self.win, tearoff=0)
+        m.add_command(label=f'Use {name}', command=lambda: self.set_theme(name))
+        m.add_command(label=f'Use {name}, keep my accent', command=lambda: self.change('theme', name))
+        m.tk_popup(button.winfo_rootx(), button.winfo_rooty() + button.winfo_height())
+
+    def sub_accent(self, c):
+        self.label(c, 'Accent color', 13, True).pack(anchor='w', padx=12, pady=(12, 2))
         self.label(c, 'Buttons, sliders, switches and the active tab.', 11, muted=True).pack(anchor='w', padx=12)
         row = ctk.CTkFrame(c, fg_color='transparent')
-        row.pack(fill='x', padx=12, pady=10)
+        row.pack(fill='x', padx=12, pady=12)
         ctk.CTkFrame(row, fg_color=self.c['acc'], width=44, height=28, corner_radius=8).pack(side='left')
         self.button(row, 'Pick color...', self.pick_accent).pack(side='left', padx=8)
         self.button(row, 'Theme default', lambda: self.change('accent', '')).pack(side='left')
 
-        c = self.card()
-        self.label(c, 'Font', 13, True).pack(anchor='w', padx=12, pady=(10, 4))
+    def sub_font(self, c):
+        self.label(c, 'Font', 13, True).pack(anchor='w', padx=12, pady=(12, 4))
         have = set(tkfont.families(self.app.root))
         ctk.CTkOptionMenu(c, values=[f for f in FONTS if f in have], command=lambda v: self.change('font', v),
-                          variable=tk.StringVar(value=self.app.settings['font']), width=220, font=self.font(12),
+                          variable=tk.StringVar(value=self.app.settings['font']), width=240, font=self.font(12),
                           dropdown_font=self.font(12), fg_color=self.c['hover'], button_color=self.c['hover'],
                           button_hover_color=self.c['acc'], text_color=self.c['text']).pack(anchor='w', padx=12)
-        self.label(c, 'The quick brown pet jumps over the taskbar.', 13).pack(anchor='w', padx=12, pady=(8, 12))
+        self.label(c, 'The quick brown pet jumps over the taskbar.', 13).pack(anchor='w', padx=12, pady=(10, 14))
 
     def set_theme(self, name):
         self.app.settings['accent'] = ''  # a theme brings its own accent
