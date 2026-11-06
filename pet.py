@@ -7,6 +7,12 @@ import urllib.request, winreg
 
 import packs
 
+try:  # sharp text and images: draw at the real screen resolution instead of letting Windows stretch a blurry copy
+    ctypes.windll.shcore.SetProcessDpiAwareness(2)  # per-monitor aware; must happen before any window exists
+except (AttributeError, OSError):
+    ctypes.windll.user32.SetProcessDPIAware()
+DPI_SCALE = ctypes.windll.user32.GetDpiForSystem() / 96  # e.g. 1.25 on a 125% display; pets grow to match
+
 VERSION = '1.0.3'        # bump before each release; release.ps1 reads it
 REPO = 'yuvancantcodeforshit/desktop-pet'
 UPDATE_URL = f'https://github.com/{REPO}/releases/latest/download/'
@@ -266,7 +272,7 @@ class Pet:
         self.state, self.timer = state, random.randint(40, 200)
 
     def resize(self):
-        self.px = int(SIZE * self.app.settings['size'])
+        self.px = pet_px(self.app.settings)
         self.cv.config(width=self.px, height=self.px)
 
     # --- mouse ---
@@ -360,6 +366,11 @@ class Pet:
         draw_blob(c, self.app.settings['color'], s, d, f, step, self.app.settings['style'])
         if self.px != SIZE:  # drawn at 64 px, then scaled to the size setting
             c.scale('all', 0, 0, self.px / SIZE, self.px / SIZE)
+
+
+def pet_px(settings):
+    """On-screen pet size in pixels: base size x size setting x display scaling."""
+    return int(SIZE * settings['size'] * DPI_SCALE)
 
 
 def draw_pack(c, pack, s, d, f, px, x=None):
@@ -504,13 +515,13 @@ class App:
     def load_character(self):
         """Load the chosen pack at the current size into self.pack; None means draw the blob."""
         name = self.settings['character']
-        key = (name, self.settings['size'])
+        key = (name, pet_px(self.settings))
         if key == getattr(self, 'pack_key', None):
             return  # unchanged: sliders call apply() many times per second, don't reload images each time
         self.pack_key, self.pack = key, None
         if name and os.path.isdir(os.path.join(PACKS_DIR, name)):
             try:
-                self.pack = packs.load_frames(os.path.join(PACKS_DIR, name), int(SIZE * self.settings['size']))
+                self.pack = packs.load_frames(os.path.join(PACKS_DIR, name), pet_px(self.settings))
             except Exception:
                 self.pack = None  # broken pack: fall back to the blob rather than crash the pets
             if self.pack and 'idle' not in self.pack[0]:
@@ -683,9 +694,9 @@ def selftest():
         L, T, R, B = p.area
         for _ in range(200):
             p.step()
-            assert L <= p.x <= R - SIZE, p.x
-        assert p.y <= B - SIZE
-        p.x, p.state, p.dir = R - SIZE, 'walk', 1  # walk into right wall
+            assert L <= p.x <= R - p.px, p.x
+        assert p.y <= B - p.px
+        p.x, p.state, p.dir = R - p.px, 'walk', 1  # walk into right wall
         p.step()
         assert p.state == 'climb' or p.dir == -1
         for style in BLOB_STYLES:
@@ -697,7 +708,7 @@ def selftest():
             panel.show(tab)
         panel.change('size', 2.0)
         panel.change('pets', 3)
-        assert p.px == 2 * SIZE and len(app.pets) == 3 and load_settings()['pets'] == 3
+        assert p.px == int(2 * SIZE * DPI_SCALE) and len(app.pets) == 3 and load_settings()['pets'] == 3
         panel.show('home')
         panel.spawn()  # clicking the character on Home
         assert len(app.pets) == 4 and load_settings()['pets'] == 4
