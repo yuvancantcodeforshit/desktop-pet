@@ -2,7 +2,11 @@
 
 this thingy lets you drop a pet on ur desktop. u can move it around and stuff, throw it against the wall, downslam it, idk. do whatever
 
-Right-click it for **Add pet / Remove this pet / Quit**.
+Right-click it for **Settings / Add pet / Remove this pet / Quit**.
+
+**Settings:** color, speed, size, number of pets, your own character image (PNG/GIF),
+which monitors pets show up on, start with Windows, and check for updates now.
+Saved in `%APPDATA%\DesktopPet\`.
 
 ## Install
 
@@ -23,6 +27,8 @@ verifies its SHA-256, and restarts into it within a minute. Offline or bad downl
 .\release.ps1 1.0.1
 ```
 
+Or use the developer panel: `pythonw dev.py` (buttons for release, selftest, run pet, git pull, GitHub).
+
 Selftest, version bump, build, commit + push, GitHub release — one command.
 Needs Python with `pyinstaller` and the GitHub CLI signed in once (`gh auth login`).
 
@@ -35,4 +41,5 @@ Needs Python with `pyinstaller` and the GitHub CLI signed in once (`gh auth logi
 | `install.cmd` | Copies the app to `%LOCALAPPDATA%\Programs\DesktopPet`, adds Start menu + Apps entry. No admin. |
 | `uninstall.cmd` | Removes all of the above. |
 | `release.ps1` | The one-command release. |
+| `dev.py` | Developer panel (not shipped): release / selftest / run / git buttons. |
 | `dist/` | Build output (not committed). |
