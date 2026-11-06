@@ -14,6 +14,7 @@ TABS = (('home', '', 'Home'), ('characters', '', 'Characters'),
 COLORS = (('Mint', '#7ecf8f'), ('Sky', '#7cc4f2'), ('Lavender', '#b9a3f0'), ('Peach', '#f7b98b'), ('Lemon', '#f2e27a'),
           ('Coral', '#f2847a'), ('Rose', '#f29fc4'), ('Teal', '#4fc1b3'), ('Grey', '#b0b0b0'), ('Midnight', '#4a5a8a'),
           ('Snow', '#f4f4f4'), ('Lime', '#b5e35a'))
+ACCENTS = ('#57c8ff', '#2f60d8', '#4fc1b3', '#7ecf8f', '#f2e27a', '#ff9e7a', '#ff6b6b', '#f29fc4', '#b9a3f0', '#e8e8e8')
 FONTS = ('Segoe UI', 'Segoe UI Variable Display', 'Bahnschrift', 'Cascadia Mono', 'Trebuchet MS', 'Comic Sans MS', 'Georgia')
 RESTYLE = {'theme', 'accent', 'font'}         # redraw the whole window
 REFRESH = {'character', 'style', 'color'}     # redraw the pages that show the character; sliders redraw nothing
@@ -91,7 +92,7 @@ class SettingsWindow:
     def fit_on_screen(self):
         """Shrink to the screen height if needed (the body scrolls) and centre on the main screen."""
         w = self.win
-        L, T, R, B = self.core.monitor_at()[1]
+        L, T, R, B = self.core.cursor_monitor()[1]  # open where the user is looking
         w.update_idletasks()
         if w.winfo_height() > B - T - 20:
             w.geometry(f'{W}x{int((B - T - 40) / ctk.ScalingTracker.get_window_scaling(w))}')
@@ -199,7 +200,9 @@ class SettingsWindow:
         bg, card, acc, text, muted = self.core.THEMES[s['theme']]
         acc = s['accent'] or acc
         light = s['theme'] == 'Light'
-        self.c = dict(bg=bg, card=card, acc=acc, text=text, muted=muted, hover=shade(card, 1.25), on_acc=ink(acc),
+        self.c = dict(bg=bg, card=card, acc=acc, text=text, muted=muted, on_acc=ink(acc),
+                      hover=shade(card, 0.93) if light else shade(card, 1.25),  # light theme: hover goes darker
+                      border=shade(card, 0.88) if light else shade(card, 1.32),  # 1px edge: dark cards need it
                       btn_hover=shade(bg, 0.88) if light else shade(bg, 2.1),
                       tip='#3a3a3a' if light else shade(card, 1.45))
         self.family = s['font'] if s['font'] in tkfont.families(self.app.root) else 'Segoe UI'
@@ -211,7 +214,7 @@ class SettingsWindow:
         self.pages, self.preview = {}, None
         self.win.configure(fg_color=bg)
         self.titlebar()
-        grip = ctk.CTkFrame(self.win, fg_color=card, corner_radius=0, height=5, cursor='sb_v_double_arrow')
+        grip = ctk.CTkFrame(self.win, fg_color=card, corner_radius=0, height=8, cursor='sb_v_double_arrow')  # ~Windows' own edge
         grip.pack(fill='x', side='bottom')
         grip.bind('<ButtonPress-1>', self.grip_press)
         grip.bind('<B1-Motion>', self.grip_drag)
@@ -288,7 +291,8 @@ class SettingsWindow:
         self.label(t, sub, 12, muted=True).pack(anchor='w')
 
     def card(self, parent=None):
-        f = ctk.CTkFrame(parent or self.body, fg_color=self.c['card'], corner_radius=12)
+        f = ctk.CTkFrame(parent or self.body, fg_color=self.c['card'], corner_radius=12, border_width=1,
+                         border_color=self.c['border'])
         f.pack(fill='x', padx=14, pady=5)
         return f
 
@@ -413,10 +417,10 @@ class SettingsWindow:
         """Plain tk canvas sized for the display scaling (CustomTkinter scales its own widgets, not these)."""
         return tk.Canvas(parent, width=int(w * self.k), height=int(h * self.k), bg=bg, highlightthickness=0)
 
-    def thumb(self, parent, name):
-        """40 px picture of a pack (or the blob for name '')."""
+    def thumb(self, parent, name, bg=None):
+        """40 px picture of a pack (or the blob for name ''), on the colour of whatever it sits on."""
         k = self.k
-        c = self.canvas(parent, 40, 40, self.c['hover'])
+        c = self.canvas(parent, 40, 40, bg or self.c['card'])
         if not name:
             s = self.app.settings
             c.create_image(int(20 * k), int(39 * k), anchor='s', image=self.blob_photo(int(38 * k), s['color'], s['style']))
@@ -448,11 +452,11 @@ class SettingsWindow:
         self.label(t, 'Character', 11, muted=True).pack(anchor='w')
         self.button(row, 'Change', lambda: self.show('characters'), width=80).pack(side='right')
         c = self.card()
-        ctk.CTkFrame(c, height=4, fg_color='transparent').pack()
+        ctk.CTkFrame(c, width=1, height=4, fg_color='transparent').pack()  # 1 px wide: must not cover the card's border
         self.slider(c, 'speed', 'Speed', 0.5, 3, 25)
         self.slider(c, 'size', 'Size', 0.5, 2.5, 20)
         self.stepper(c, 'pets', 'Pets', 0, 10)
-        ctk.CTkFrame(c, height=4, fg_color='transparent').pack()
+        ctk.CTkFrame(c, width=1, height=4, fg_color='transparent').pack()  # 1 px wide: must not cover the card's border
         self.switch(self.card(), 'Show pets', 'Hide every pet without quitting. The tray icon can bring them back.',
                     self.app.visible, self.app.set_visible)
         self.update_count()
@@ -504,7 +508,8 @@ class SettingsWindow:
             for w in [t] + parts:
                 w.bind('<Button-1>', lambda e, n=name: self.pick_subtab(page, n))
                 w.configure(cursor='hand2')
-        panel = ctk.CTkFrame(self.body, fg_color=self.c['card'], corner_radius=12)
+        panel = ctk.CTkFrame(self.body, fg_color=self.c['card'], corner_radius=12, border_width=1,
+                             border_color=self.c['border'])
         panel.pack(fill='x', padx=14, pady=(0, 6))
         dict((n, f) for n, _, f in tabs)[current](panel)
 
@@ -515,15 +520,22 @@ class SettingsWindow:
 
     def hoverable(self, frame, widgets, hot):
         """Light up a row while the pointer is anywhere over it (moving onto a child must not flicker it off)."""
+        canvases = [w for w in widgets if isinstance(w, tk.Canvas)]  # thumbnails follow the row colour
+
+        def paint(fg, bg):
+            frame.configure(fg_color=fg)
+            for c in canvases:
+                c.configure(bg=bg)
+
         def leave(_):
             x, y = frame.winfo_pointerxy()
             w = frame.winfo_containing(x, y)
             while w is not None and w is not frame:
                 w = w.master
             if w is None:
-                frame.configure(fg_color='transparent')
+                paint('transparent', self.c['card'])
         for w in widgets:
-            w.bind('<Enter>', lambda e: frame.configure(fg_color=hot), add='+')
+            w.bind('<Enter>', lambda e: paint(hot, hot), add='+')
             w.bind('<Leave>', leave, add='+')
 
     def square_button(self, parent, icon, command, color=None):
@@ -551,7 +563,7 @@ class SettingsWindow:
             active = name == current
             r = ctk.CTkFrame(c, fg_color=self.c['hover'] if active else 'transparent', corner_radius=10)
             r.pack(fill='x', padx=6, pady=2)
-            parts = [self.thumb(r, name)]
+            parts = [self.thumb(r, name, self.c['hover'] if active else self.c['card'])]
             parts[0].pack(side='left', padx=8, pady=6)
             t = ctk.CTkFrame(r, fg_color='transparent')
             t.pack(side='left')
@@ -568,11 +580,16 @@ class SettingsWindow:
                 self.hoverable(r, [r] + parts, hot)
             for w in [r] + parts:
                 w.bind('<Button-1>', lambda e, n=name: self.change('character', n))
-        ctk.CTkFrame(c, height=6, fg_color='transparent').pack()
+        ctk.CTkFrame(c, width=1, height=6, fg_color='transparent').pack()  # 1 px wide: must not cover the card's border
 
     def sub_blob(self, c):
         row = ctk.CTkFrame(c, fg_color='transparent')
         row.pack(fill='x', padx=12, pady=(12, 0))
+        st, k = self.app.settings, self.k
+        preview = self.canvas(row, 64, 64, self.c['card'])  # live look at the blob being styled
+        preview.create_image(int(32 * k), int(63 * k), anchor='s',
+                             image=self.blob_photo(int(60 * k), st['color'], st['style']))
+        preview.pack(side='right')
         self.label(row, 'Style', width=60, anchor='w').pack(side='left')
         ctk.CTkOptionMenu(row, values=list(self.core.BLOB_STYLES), command=lambda v: self.change('style', v),
                           fg_color=self.c['hover'], button_color=self.c['hover'], button_hover_color=self.c['acc'],
@@ -681,6 +698,16 @@ class SettingsWindow:
             more.bind('<Leave>', lambda e, m=more, i=normal: m.configure(image=i))
             more.bind('<Button-1>', lambda e, n=name, m=more: self.theme_menu(n, m))
 
+    def swatch_image(self, color, selected):
+        """Round colour swatch; the chosen one gets a ring."""
+        from PIL import Image, ImageDraw
+        img = Image.new('RGBA', (120, 120), (0, 0, 0, 0))
+        d = ImageDraw.Draw(img)
+        if selected:
+            d.ellipse((2, 2, 117, 117), outline=self.c['text'], width=7)
+        d.ellipse((20, 20, 99, 99), fill=color)
+        return ctk.CTkImage(img, size=(30, 30))
+
     def dots_image(self, fill, dot):
         """Round '...' button picture (a real circle; a CTk button this small pads itself into a pill)."""
         from PIL import Image, ImageDraw
@@ -701,6 +728,13 @@ class SettingsWindow:
     def sub_accent(self, c):
         self.label(c, 'Accent color', 13, True).pack(anchor='w', padx=12, pady=(12, 2))
         self.label(c, 'Buttons, sliders, switches and the active tab.', 11, muted=True).pack(anchor='w', padx=12)
+        row = ctk.CTkFrame(c, fg_color='transparent')
+        row.pack(anchor='w', padx=8, pady=(10, 0))
+        for col in ACCENTS:
+            on = col.lower() == self.c['acc'].lower()
+            sw = ctk.CTkLabel(row, text='', image=self.swatch_image(col, on), width=34, height=34, cursor='hand2')
+            sw.pack(side='left', padx=2)
+            sw.bind('<Button-1>', lambda e, v=col: self.change('accent', v))
         row = ctk.CTkFrame(c, fg_color='transparent')
         row.pack(fill='x', padx=12, pady=12)
         ctk.CTkFrame(row, fg_color=self.c['acc'], width=44, height=28, corner_radius=8).pack(side='left')
@@ -762,13 +796,14 @@ class SettingsWindow:
     def sec_screens(self, c):
         self.label(c, 'Pets only walk on the screens you tick.', 11, muted=True).pack(anchor='w', padx=12)
         self.mon_vars = []
-        for name, (L, T, R, B) in self.core.all_monitors():
+        for i, (name, (L, T, R, B)) in enumerate(self.core.all_monitors()):
             var = tk.BooleanVar(value=not self.app.settings['monitors'] or name in self.app.settings['monitors'])
-            ctk.CTkCheckBox(c, text=f'{name.replace(chr(92), "").replace(".", "")}  ({R - L}x{B - T})', variable=var,
+            label = f'Screen {i + 1}' + ('  \u00b7  main' if i == 0 else '') + f'   {R - L} x {B - T}'
+            ctk.CTkCheckBox(c, text=label, variable=var,
                             command=self.change_monitors, font=self.font(12), text_color=self.c['text'],
                             fg_color=self.c['acc'], hover_color=shade(self.c['acc'], 0.85)).pack(anchor='w', padx=12, pady=4)
             self.mon_vars.append((name, var))
-        ctk.CTkFrame(c, height=6, fg_color='transparent').pack()
+        ctk.CTkFrame(c, width=1, height=6, fg_color='transparent').pack()  # 1 px wide: must not cover the card's border
 
     def change_monitors(self):
         on = [name for name, v in self.mon_vars if v.get()]
