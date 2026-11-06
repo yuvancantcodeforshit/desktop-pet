@@ -301,6 +301,45 @@ def single_instance():
     return False
 
 
+FLOOR_STATES = ('walk', 'run', 'idle', 'sit', 'lie', 'dance')
+STAND_INS = {'run': ('walk',), 'chase': ('run', 'walk'), 'lie': ('sit',), 'ceiling': ('drag',)}  # pack lacks a state
+
+
+def cursor_pos():
+    pt = ctypes.wintypes.POINT()
+    user32.GetCursorPos(ctypes.byref(pt))
+    return pt.x, pt.y
+
+
+user32.GetForegroundWindow.restype = ctypes.c_void_p
+user32.IsIconic.argtypes = user32.IsZoomed.argtypes = [ctypes.c_void_p]
+user32.GetWindowThreadProcessId.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.wintypes.DWORD)]
+user32.GetClassNameW.argtypes = [ctypes.c_void_p, ctypes.c_wchar_p, ctypes.c_int]
+user32.GetWindowRect.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.wintypes.RECT)]
+ctypes.windll.dwmapi.DwmGetWindowAttribute.argtypes = [ctypes.c_void_p, ctypes.wintypes.DWORD, ctypes.c_void_p,
+                                                       ctypes.wintypes.DWORD]
+SHELL_CLASSES = {'Progman', 'WorkerW', 'Shell_TrayWnd', 'Shell_SecondaryTrayWnd'}
+
+
+def active_window():
+    """(hwnd, left, top, right) of the window in front, if pets can stand on it (not ours, not minimized,
+    maximized or the desktop/taskbar); else None."""
+    h = user32.GetForegroundWindow()
+    if not h or user32.IsIconic(h) or user32.IsZoomed(h):
+        return None
+    pid = ctypes.wintypes.DWORD()
+    user32.GetWindowThreadProcessId(h, ctypes.byref(pid))
+    cls = ctypes.create_unicode_buffer(64)
+    user32.GetClassNameW(h, cls, 64)
+    if pid.value == os.getpid() or cls.value in SHELL_CLASSES:
+        return None
+    r = ctypes.wintypes.RECT()
+    # the visible frame (GetWindowRect includes Windows 10/11's invisible resize borders)
+    if ctypes.windll.dwmapi.DwmGetWindowAttribute(h, 9, ctypes.byref(r), ctypes.sizeof(r)):
+        user32.GetWindowRect(h, ctypes.byref(r))
+    return (h, r.left, r.top, r.right) if r.right - r.left >= 150 else None
+
+
 class Pet:
     def __init__(self, app):
         self.app, self.alive = app, True
@@ -312,6 +351,7 @@ class Pet:
         self.area = L, T, R, B = random.choice(app.allowed_areas())  # start on a monitor allowed in Settings
         self.x, self.y = random.randint(L, max(L, R - self.px)), T
         self.vx = self.vy = 0
+        self.ledge = None  # the window this pet stands on, as (hwnd, left, top, right)
         self.dir = random.choice((-1, 1))
         self.frame = 0
         self.set('fall')
@@ -323,8 +363,8 @@ class Pet:
             w.withdraw()
         self.tick()
 
-    def set(self, state):
-        self.state, self.timer = state, random.randint(40, 200)
+    def set(self, state, timer=None):
+        self.state, self.timer = state, timer or random.randint(40, 200)
 
     def resize(self):
         self.px = int(pet_px(self.app.settings) * (self.app.pack_scale if self.app.pack else 1))
@@ -371,23 +411,53 @@ class Pet:
         L, T, R, B = self.area
         px, speed = self.px, self.app.settings['speed']
         floor, s = B - px, self.state
-        self.frame += 1
         self.timer -= 1
+        cx = self.x + px / 2
+        w = self.app.win  # active window: (hwnd, left, top, right) or None
+        if self.ledge:  # standing on a window: it is the floor, its width is the walkway; ride along if it moves
+            if not w or w[0] != self.ledge[0] or w[2] - px < T:
+                self.ledge = None
+                if s not in ('fall', 'drag'):
+                    self.set('fall')
+            else:
+                self.x += w[1] - self.ledge[1]
+                self.y += w[2] - self.ledge[2]
+                self.ledge = w
+                L, R, floor = w[1], w[3], w[2] - px
         if s == 'fall':
+            bottom = self.y + px
             self.vy += GRAVITY
             self.x += self.vx
             self.y += self.vy
             if not L <= self.x <= R - px:
                 self.x = max(L, min(R - px, self.x))
                 self.vx = -self.vx * 0.5
+            cx = self.x + px / 2
+            if (w and not self.ledge and self.vy > 0 and w[1] <= cx <= w[3] and bottom <= w[2] <= self.y + px
+                    and w[2] - px > T):  # dropping past a window's top edge: land on it
+                self.ledge, floor = w, w[2] - px
             if self.y >= floor:
                 self.y, self.vx, self.vy = floor, 0, 0
                 self.set('idle')
-        elif s == 'walk':
-            self.x += 2 * speed * self.dir
+        elif s in ('walk', 'run', 'chase'):
+            if s == 'chase':  # after the mouse pointer, as long as it stays on this screen
+                mx = cursor_pos()[0]
+                if abs(mx - cx) < px / 3 or not L <= mx <= R:
+                    self.set('idle')
+                    return
+                self.dir = 1 if mx > cx else -1
+            self.x += (2 if s == 'walk' else 4) * speed * self.dir
+            if s == 'run' and random.random() < 0.004:  # tripped over its own feet
+                self.set('lie', 45)
             if not L <= self.x <= R - px:
                 self.x = max(L, min(R - px, self.x))
-                if random.random() < 0.5:
+                if self.ledge:  # end of the window: sit on the edge, or hop off
+                    if random.random() < 0.5:
+                        self.set('sit')
+                    else:
+                        self.ledge, self.vx, self.vy = None, self.dir * 3, -6
+                        self.set('fall')
+                elif random.random() < 0.5:
                     self.set('climb')
                 else:
                     self.dir = -self.dir
@@ -407,30 +477,61 @@ class Pet:
                 self.set('fall')
             elif self.timer <= 0 and random.random() < 0.006:
                 self.set('fall')
-        if s in ('walk', 'idle', 'sit') and self.timer <= 0:
-            self.set(random.choice(('walk', 'walk', 'idle', 'sit')))
-            if self.state == 'walk':
-                self.dir = random.choice((-1, 1))
+        if s in ('idle', 'sit') and self.timer % 10 == 0:  # keep an eye on the mouse pointer
+            self.dir = 1 if cursor_pos()[0] > cx else -1
+        if s in FLOOR_STATES and self.timer <= 0:
+            self.next_move(w, cx)
+
+    def next_move(self, w, cx):
+        """Pick what to do next while standing around."""
+        mx, my = cursor_pos()
+        L, T, R, B = self.area
+        choices = ['walk'] * 3 + ['idle'] * 2 + ['sit'] * 2 + ['run', 'lie', 'dance']
+        if L <= mx <= R and T <= my <= B:
+            choices.append('chase')
+        if (w and not self.ledge and w[2] < self.y and w[3] - w[1] > self.px * 2
+                and w[1] < R - self.px and w[3] > L + self.px):  # only windows on this pet's screen
+            choices.append('jump')
+        move = random.choice(choices)
+        if move == 'jump':  # leap up onto the active window's top edge
+            h = self.y + self.px - w[2]
+            if 0 < h < 700:
+                self.vy = -((2 * GRAVITY * (h + 30)) ** 0.5)
+                t = (-self.vy + max(0, self.vy ** 2 - 2 * GRAVITY * h) ** 0.5) / GRAVITY
+                target = min(max(cx, w[1] + self.px, L + self.px), w[3] - self.px, R - self.px)
+                self.vx = max(-25, min(25, (target - cx) / max(t, 1)))
+                self.set('fall')
+                return
+            move = 'idle'
+        self.set(move)
+        if move in ('walk', 'run'):
+            self.dir = random.choice((-1, 1))
 
     def tick(self):
         if not self.alive:
             return
+        self.frame += 1
         if self.state != 'drag':
             self.step()
             self.win.geometry(f'+{int(self.x)}+{int(self.y)}')
+        elif self.frame % 30 > 18:  # held still for a moment: wriggle to get free
+            self.win.geometry(f'+{int(self.x) + (2 if self.frame % 4 < 2 else -2)}+{int(self.y)}')
         self.draw()
         self.win.after(33, self.tick)
 
     def picture(self):
         """This tick's PIL picture of the pet."""
         d, f, s = self.dir, self.frame, self.state
-        if self.app.pack:  # character pack: that state's animation, mirrored when facing left
+        if s == 'dance':  # turn to and fro to the beat
+            d = 1 if f // 12 % 2 else -1
+        if self.app.pack:  # character pack: that state's animation (or a stand-in), mirrored when facing left
             frames, fps = self.app.pack
-            right, left = frames.get(s) or (s == 'ceiling' and frames.get('drag')) or frames['idle']
-            seq = left if d < 0 else right
+            pair = next((frames[k] for k in (s,) + STAND_INS.get(s, ()) if k in frames), frames['idle'])
+            seq = pair[1] if d < 0 else pair[0]
             return seq[int(f * fps / 30) % len(seq)]
-        step = 3 if s in ('walk', 'climb', 'ceiling') and f // 5 % 2 else 0
-        blink = f % 100 < 4 or s == 'sit' and f % 200 < 100
+        fast = s in ('run', 'chase')
+        step = 3 if s in ('walk', 'climb', 'ceiling', 'run', 'chase', 'dance') and f // (3 if fast else 5) % 2 else 0
+        blink = f % 100 < 4 or s == 'sit' and f % 200 < 100 or s == 'lie'
         st = self.app.settings
         return self.app.blob_frame(s, 1 if d > 0 else -1, step, blink, st['style'], st['color'], self.px)
 
@@ -515,7 +616,7 @@ def blob_image(size, color, style='Blob', f=50):
 def draw_blob(c, color, s='idle', d=1, f=0, step=0, style='Blob'):
     """The default pet at 64 px on canvas c: state s, facing d (-1/1), animation frame f, foot step offset,
     style one of BLOB_STYLES (ears, ghost tail)."""
-    top = 26 if s == 'sit' else 20 if s == 'ceiling' else 14 + (2 if step else 0)
+    top = 26 if s == 'sit' else 34 if s == 'lie' else 20 if s == 'ceiling' else 14 + (2 if step else 0)
     if s == 'ceiling':  # hanging from the top edge: arms up, one hand forward per step
         c.create_line(24, top + 8, 22 + step, 0, fill=LINE, width=3)
         c.create_line(40, top + 8, 42 - step, 0, fill=LINE, width=3)
@@ -585,6 +686,7 @@ class App:
         self.panel = None
         self.visible = True
         self.minutes = 0
+        self.win = None  # active window pets can stand on; refreshed by watch_window()
         self.events = queue.Queue()  # tray icon runs in its own thread; it posts here, tk reads in poll()
         self.tray = start_tray(self) if tray else None
         self.show_event = k32.CreateEventW(None, False, False, SHOW_EVENT)
@@ -601,6 +703,12 @@ class App:
         if window and not startup:
             self.root.after(50, self.open_settings)
         self.poll()
+        self.watch_window()
+
+    def watch_window(self):
+        self.win = active_window()
+        if self.root.winfo_exists():
+            self.root.after(100, self.watch_window)
 
     def poll(self):
         try:
@@ -848,7 +956,8 @@ def check_packs(d):
 
 
 def selftest():
-    global SETTINGS_FILE, PACKS_DIR, CHARACTER_FILE
+    global SETTINGS_FILE, PACKS_DIR, CHARACTER_FILE, active_window
+    active_window = lambda: None  # the user's real windows must not take part in the test
     assert newer('1.0.10', '1.0.9') and not newer('1.0.0', '1.0.0') and not newer('0.9', '1.0')
     check_updater()
     assert os.path.exists(LOGO), f'missing {LOGO}'
@@ -878,6 +987,42 @@ def selftest():
         p.timer, p.x = 10 ** 6, L + 1  # monkey-barred all the way across
         p.step()
         assert p.state == 'fall'
+        # a window under a falling pet becomes its floor; it rides along when the window moves; walks off its end
+        win = (12345, L + 100, T + 400, L + 700)
+        app.win = win
+        p.x, p.y, p.vx, p.vy, p.ledge = L + 300, T + 400 - p.px - 30, 0, 5, None
+        p.set('fall')
+        for _ in range(10):
+            p.step()
+        assert p.ledge and p.state == 'idle' and p.y == T + 400 - p.px, (p.state, p.y)
+        app.win = (12345, L + 150, T + 380, L + 750)
+        p.step()
+        assert p.y == T + 380 - p.px and p.ledge[1] == L + 150, 'rides the moved window'
+        p.set('walk', 10 ** 6)
+        p.dir, p.x = 1, L + 750 - p.px
+        p.step()
+        assert p.state in ('sit', 'fall'), p.state
+        p.ledge, app.win = (12345, L + 150, T + 380, L + 750), None
+        p.set('idle')
+        p.step()
+        assert not p.ledge and p.state == 'fall', 'window gone: falls'
+        # leap from the floor onto a window above
+        p.ledge, p.state, p.y, p.x = None, 'idle', B - p.px, L + 300
+        random.seed(1)
+        app.win = (12345, L + 200, B - 300, L + 900)
+        for _ in range(200):
+            p.next_move(app.win, p.x + p.px / 2)
+            if p.state == 'fall' and p.vy < 0:
+                break
+        for _ in range(200):
+            p.step()
+            if p.state != 'fall':
+                break
+        assert p.ledge and p.y == B - 300 - p.px, ('jump onto window', p.state, p.y)
+        app.win = None
+        for st in ('run', 'chase', 'lie', 'dance'):  # new poses draw for the blob
+            p.state = st
+            p.draw()
         for style in BLOB_STYLES:
             app.settings['style'] = style
             p.draw()
