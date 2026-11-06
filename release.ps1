@@ -39,7 +39,8 @@ function Sign($file) {
 
 $w = "$env:TEMP\petbuild"
 python -m PyInstaller --onefile --noconsole --name DesktopPet --distpath dist --workpath $w --specpath $w --log-level ERROR `
-    --collect-data customtkinter --collect-all tkinterdnd2 --hidden-import pystray._win32 --hidden-import panel pet.py
+    --collect-data customtkinter --collect-all tkinterdnd2 --hidden-import pystray._win32 --hidden-import panel `
+    --icon "$PWD\logo.ico" --add-data "$PWD\logo.ico;." pet.py
 if ($LASTEXITCODE) { throw 'building DesktopPet.exe failed' }
 Sign dist\DesktopPet.exe  # before hashing and before the installer bundles it
 # Test the packed exe too: a broken build would ship to every pet and could never update itself again.
@@ -49,7 +50,7 @@ if ((Start-Process dist\DesktopPet.exe -ArgumentList '--selftest' -Wait -PassThr
 $hash = (Get-FileHash dist\DesktopPet.exe -Algorithm SHA256).Hash.ToLower()
 @{ version = $Version; sha256 = $hash } | ConvertTo-Json | Set-Content dist\latest.json -Encoding ascii
 
-python -m PyInstaller --onefile --noconsole --name DesktopPetSetup --distpath dist --workpath $w --specpath $w --log-level ERROR `
+python -m PyInstaller --onefile --noconsole --name DesktopPetSetup --distpath dist --workpath $w --specpath $w --log-level ERROR --icon "$PWD\logo.ico" `
     --add-data "$PWD\dist\DesktopPet.exe;." --add-data "$PWD\install.cmd;." --add-data "$PWD\uninstall.cmd;." installer.py
 if ($LASTEXITCODE) { throw 'building DesktopPetSetup.exe failed' }
 Sign dist\DesktopPetSetup.exe

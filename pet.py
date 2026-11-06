@@ -36,6 +36,32 @@ THEMES = {
 DEFAULTS = {'color': '#7ecf8f', 'speed': 1.0, 'size': 1.0, 'pets': 1, 'monitors': [], 'character': '',
             'style': 'Blob', 'theme': 'Midnight', 'accent': '', 'font': 'Segoe UI'}
 RUN_KEY = r'Software\Microsoft\Windows\CurrentVersion\Run'
+# app icon; bundled next to the code (PyInstaller unpacks data files into sys._MEIPASS)
+LOGO = os.path.join(getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__))), 'logo.ico')
+
+
+def logo_image(size=256, color=DEFAULTS['color']):
+    """The default blob as a square RGBA picture: app icon, tray icon, title bar logo.
+    logo.ico is made from it: python -c "import pet; pet.save_logo()" """
+    from PIL import Image, ImageDraw
+    k = size * 4 / 64  # draw 4x bigger on a 64-unit grid, then shrink for smooth edges
+    img = Image.new('RGBA', (size * 4, size * 4), (0, 0, 0, 0))
+    d = ImageDraw.Draw(img)
+    at = lambda *xy: [v * k for v in xy]
+    line = max(1, round(2.5 * k))
+    d.ellipse(at(15, 49, 28, 60), fill=LINE)  # feet
+    d.ellipse(at(36, 47, 49, 58), fill=LINE)
+    d.ellipse(at(5, 8, 59, 57), fill=color, outline=LINE, width=line)
+    for x in (24, 40):
+        d.ellipse(at(x - 3.5, 26, x + 3.5, 34), fill=LINE)  # eyes
+    d.arc(at(26, 30, 38, 42), 25, 155, fill=LINE, width=line)  # smile
+    for x in (15, 49):
+        d.ellipse(at(x - 4.5, 36, x + 4.5, 42), fill=CHEEK)
+    return img.resize((size, size), Image.LANCZOS)
+
+
+def save_logo(path=None):
+    logo_image(256).save(path or LOGO, sizes=[(s, s) for s in (16, 20, 24, 32, 40, 48, 64, 128, 256)])
 
 
 # --- settings ---
@@ -387,6 +413,8 @@ class App:
     def __init__(self, tray=True):
         self.root = tk.Tk()
         self.root.withdraw()
+        if os.path.exists(LOGO):
+            self.root.iconbitmap(default=LOGO)  # every window's taskbar / title icon
         try:  # drag-and-drop for the Characters tab; the app works without it
             from tkinterdnd2 import TkinterDnD
             TkinterDnD._require(self.root)
@@ -520,16 +548,10 @@ def start_tray(app):
     """Tray icon next to the clock: click = Settings; menu = Settings, Show pets, Quit. None if pystray is missing."""
     try:
         import pystray
-        from PIL import Image, ImageDraw
     except ImportError:
         return None
-    img = Image.new('RGBA', (64, 64), (0, 0, 0, 0))
-    d = ImageDraw.Draw(img)
-    d.ellipse((6, 10, 58, 60), fill=app.settings['color'], outline=LINE, width=4)
-    for x in (22, 38):
-        d.ellipse((x - 4, 28, x + 4, 36), fill=LINE)
     post = lambda ev: (lambda icon, item: app.events.put(ev))
-    icon = pystray.Icon('DesktopPet', img, 'Desktop Pet', pystray.Menu(
+    icon = pystray.Icon('DesktopPet', logo_image(64, app.settings['color']), 'Desktop Pet', pystray.Menu(
         pystray.MenuItem('Settings', post('open'), default=True),
         pystray.MenuItem('Show pets', post('toggle'), checked=lambda item: app.visible),
         pystray.Menu.SEPARATOR,
@@ -620,6 +642,8 @@ def selftest():
     global SETTINGS_FILE, PACKS_DIR, CHARACTER_FILE
     assert newer('1.0.10', '1.0.9') and not newer('1.0.0', '1.0.0') and not newer('0.9', '1.0')
     check_updater()
+    assert os.path.exists(LOGO), f'missing {LOGO}'
+    assert logo_image(32).size == (32, 32) and logo_image(32).getpixel((16, 16))[3] == 255  # solid in the middle
     assert all_monitors() and all_monitors()[0] == monitor_at()
     with tempfile.TemporaryDirectory() as d:
         check_settings(d)

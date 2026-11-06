@@ -41,6 +41,9 @@ class SettingsWindow:
         w = self.win = ctk.CTkToplevel(app.root)
         w.overrideredirect(True)  # our own title bar instead of the white Windows one
         w.attributes('-topmost', True)
+        if os.path.exists(core.LOGO):
+            w.iconbitmap(core.LOGO)  # also stops CustomTkinter swapping in its own icon
+        self.logo = ctk.CTkImage(core.logo_image(64), size=(20, 20))
         L, T, R, B = core.monitor_at()[1]
         w.geometry(f'{W}x{H}+{L + (R - L - W) // 2}+{T + (B - T - H) // 2}')
         self.build()
@@ -113,8 +116,9 @@ class SettingsWindow:
         c = self.c
         bar = ctk.CTkFrame(self.win, fg_color=c['bg'], corner_radius=0, height=38)
         bar.pack(fill='x', side='top')
-        title = ctk.CTkLabel(bar, text='Desktop Pet', font=self.font(13, True), text_color=c['text'])
-        title.pack(side='left', padx=(14, 6))
+        title = ctk.CTkLabel(bar, text=' Desktop Pet', image=self.logo, compound='left', font=self.font(13, True),
+                             text_color=c['text'])
+        title.pack(side='left', padx=(12, 6))
         ver = ctk.CTkLabel(bar, text=f'v{self.core.VERSION}', font=self.font(11), text_color=c['muted'])
         ver.pack(side='left')
         for icon, cmd in (('', self.close), ('', self.hide), ('', self.minimize)):  # close, eye, minimize
@@ -142,11 +146,12 @@ class SettingsWindow:
                 w.bind('<Button-1>', lambda e, k=key: self.show(k))
                 w.configure(cursor='hand2')
 
-    def header(self, icon, title, sub):
+    def header(self, icon, title, sub, image=None):
         h = ctk.CTkFrame(self.body, fg_color='transparent')
         h.pack(fill='x', padx=14, pady=(10, 8))
-        ctk.CTkLabel(h, text=icon, font=ctk.CTkFont(family=ICONS, size=22), text_color=self.c['text'], width=46,
-                     height=46, fg_color=self.c['card'], corner_radius=12).pack(side='left')
+        ctk.CTkLabel(h, text='' if image else icon, image=image, font=ctk.CTkFont(family=ICONS, size=22),
+                     text_color=self.c['text'], width=46, height=46, fg_color=self.c['card'],
+                     corner_radius=12).pack(side='left')
         t = ctk.CTkFrame(h, fg_color='transparent')
         t.pack(side='left', padx=12)
         self.label(t, title, 18, True).pack(anchor='w')
@@ -244,7 +249,8 @@ class SettingsWindow:
 
     # --- Home ---
     def page_home(self):
-        self.header('', 'Desktop Pet', 'Your little desk buddy')
+        self.header('', 'Desktop Pet', 'Your little desk buddy',
+                    ctk.CTkImage(self.core.logo_image(96), size=(32, 32)))
         self.preview = tk.Canvas(self.card(), width=180, height=130, bg=self.c['card'], highlightthickness=0)
         self.preview.pack(pady=8)
         row = ctk.CTkFrame(self.card(), fg_color='transparent')
