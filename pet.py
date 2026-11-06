@@ -161,6 +161,13 @@ def monitor_at(x=0, y=0):
     return _monitor_info(user32.MonitorFromPoint(ctypes.wintypes.POINT(int(x), int(y)), 2))  # MONITOR_DEFAULTTONEAREST
 
 
+def cursor_monitor():
+    """(name, work area) of the monitor the mouse pointer is on."""
+    pt = ctypes.wintypes.POINT()
+    user32.GetCursorPos(ctypes.byref(pt))
+    return monitor_at(pt.x, pt.y)
+
+
 def all_monitors():
     """[(name, work area)] of every connected monitor, primary first."""
     found = []
