@@ -11,7 +11,7 @@ import io, json, os, re, shutil, zipfile
 
 from PIL import Image, ImageOps, ImageSequence, ImageTk
 
-STATES = ('idle', 'walk', 'fall', 'drag', 'sit', 'climb')
+STATES = ('idle', 'walk', 'fall', 'drag', 'sit', 'climb', 'ceiling')
 EXTS = ('.gif', '.png')
 MAX_FILE = 20_000_000    # bytes per image
 MAX_SIDE = 2048          # px
@@ -137,7 +137,7 @@ def import_pack(src, packs_dir):
 
 # Shimeji action names that feed each pet state (first one found wins)
 SHIMEJI_ACTIONS = {'idle': ('Stand',), 'walk': ('Walk',), 'fall': ('Falling', 'Fall'), 'drag': ('Pinched', 'Resisting'),
-                   'sit': ('Sit',), 'climb': ('ClimbWall', 'GrabWall')}
+                   'sit': ('Sit',), 'climb': ('ClimbWall', 'GrabWall'), 'ceiling': ('ClimbCeiling', 'GrabCeiling')}
 MAX_CHARACTERS = 20
 MAX_TICKS = 250  # longest pose we keep, in Shimeji ticks (25 per second)
 
@@ -239,9 +239,9 @@ def scale_of(meta):
     return min(4, max(0.5, k)) if isinstance(k, (int, float)) and not isinstance(k, bool) else 1
 
 
-def load_frames(folder, px, smooth=False):
+def load_frames(folder, px, smooth=False, pil=False):
     """({state: (frames facing right, frames facing left)}, fps). Frames are PhotoImages fitted in a px square.
-    smooth keeps soft edges (for the Settings window); the pets need hard edges (see below).
+    smooth keeps soft edges (for the Settings window); pil gives smooth PIL pictures instead (the pets).
     Animations come from pack.json "frames" ({state: [[image, ticks], ...]}, Shimeji style) or one file per state."""
     meta = read_meta(folder)
     fps = meta.get('fps', 8)
@@ -256,9 +256,14 @@ def load_frames(folder, px, smooth=False):
                 for fr in ImageSequence.Iterator(im):
                     fr = fr.convert('RGBA')
                     k = px / max(fr.size)
+                    # smooth scaling; only big integer-ish blow-ups of tiny pixel art stay blocky on purpose
                     fr = fr.resize((max(1, round(fr.width * k)), max(1, round(fr.height * k))),
-                                   Image.NEAREST if k > 1 else Image.LANCZOS)  # NEAREST keeps pixel art crisp
-                    if not smooth:  # the pet window can only show fully clear or fully solid pixels
+                                   Image.NEAREST if k >= 2 else Image.LANCZOS)
+                    if pil:
+                        right.append(fr)
+                        left.append(ImageOps.mirror(fr))
+                        continue
+                    if not smooth:  # hard edges for anything shown with a single see-through colour
                         fr.putalpha(fr.getchannel('A').point(lambda v: 255 if v >= 128 else 0))
                     right.append(ImageTk.PhotoImage(fr))
                     left.append(ImageTk.PhotoImage(ImageOps.mirror(fr)))
