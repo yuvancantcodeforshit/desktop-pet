@@ -1,7 +1,7 @@
 """Desktop pet: walks on the taskbar, climbs screen edges, falls, can be dragged and thrown.
 Run: pythonw pet.py   (right-click a pet for Settings / Add / Remove / Quit; tray icon too)
 """
-import ctypes, ctypes.wintypes, hashlib, io, json, os, queue, random, re, shutil, subprocess, sys, tempfile, threading
+import ctypes, ctypes.wintypes, hashlib, io, json, math, os, queue, random, re, shutil, subprocess, sys, tempfile, threading, time
 import tkinter as tk
 import urllib.request, winreg
 
@@ -11,7 +11,8 @@ try:  # sharp text and images: draw at the real screen resolution instead of let
     ctypes.windll.shcore.SetProcessDpiAwareness(2)  # per-monitor aware; must happen before any window exists
 except (AttributeError, OSError):
     ctypes.windll.user32.SetProcessDPIAware()
-DPI_SCALE = ctypes.windll.user32.GetDpiForSystem() / 96  # e.g. 1.25 on a 125% display; pets grow to match
+DPI_SCALE = ctypes.windll.user32.GetDpiForSystem() / 96
+ctypes.windll.winmm.timeBeginPeriod(1)  # 1 ms timer: Windows' default 15.6 ms tick held Tk's timer to ~43 fps  # e.g. 1.25 on a 125% display; pets grow to match
 
 VERSION = '1.0.3'        # bump before each release; release.ps1 reads it
 REPO = 'yuvancantcodeforshit/desktop-pet'
@@ -208,8 +209,9 @@ gdi32.SelectObject.argtypes = [_vp, _vp]
 gdi32.DeleteObject.argtypes = gdi32.DeleteDC.argtypes = [_vp]
 
 
-def show_layered(hwnd, data, w, h):
-    """Put w x h premultiplied BGRA bytes on a layered window."""
+def show_layered(hwnd, data, w, h, x=None, y=None):
+    """Put w x h premultiplied BGRA bytes on a layered window, moving it to (x, y) in the same call
+    (moving and redrawing separately made the pet stutter)."""
     screen = user32.GetDC(None)
     mem = gdi32.CreateCompatibleDC(screen)
     bits = _vp()
@@ -218,7 +220,8 @@ def show_layered(hwnd, data, w, h):
     if bmp and bits:
         ctypes.memmove(bits, data, len(data))
         old = gdi32.SelectObject(mem, bmp)
-        user32.UpdateLayeredWindow(hwnd, screen, None, ctypes.byref(ctypes.wintypes.SIZE(w, h)), mem,
+        dst = None if x is None else ctypes.byref(ctypes.wintypes.POINT(int(x), int(y)))
+        user32.UpdateLayeredWindow(hwnd, screen, dst, ctypes.byref(ctypes.wintypes.SIZE(w, h)), mem,
                                    ctypes.byref(ctypes.wintypes.POINT(0, 0)), 0,
                                    ctypes.byref(BLENDFUNCTION(0, 0, 255, 1)), 2)  # AC_SRC_ALPHA, ULW_ALPHA
         gdi32.SelectObject(mem, old)
@@ -301,6 +304,7 @@ def single_instance():
     return False
 
 
+STEP = 1 / 30  # seconds per movement step
 FLOOR_STATES = ('walk', 'run', 'idle', 'sit', 'lie', 'dance')
 STAND_INS = {'run': ('walk',), 'chase': ('run', 'walk'), 'lie': ('sit',), 'ceiling': ('drag',)}  # pack lacks a state
 
@@ -353,7 +357,10 @@ class Pet:
         self.vx = self.vy = 0
         self.ledge = None  # the window this pet stands on, as (hwnd, left, top, right)
         self.dir = random.choice((-1, 1))
-        self.frame = 0
+        self.frame = 0       # physics steps (30 a second): drives sprite animation and timers
+        self.t = 0.0         # seconds alive, continuous: drives the blob's smooth motion
+        self.prev = (self.x, self.y)
+        self.acc, self.last = 0.0, time.perf_counter()
         self.set('fall')
         w.bind('<ButtonPress-1>', self.grab)
         w.bind('<B1-Motion>', self.drag)
@@ -379,8 +386,8 @@ class Pet:
     def drag(self, e):
         nx, ny = e.x_root - self.ox, e.y_root - self.oy
         self.vx, self.vy = nx - self.x, ny - self.y
-        self.x, self.y = nx, ny
-        self.win.geometry(f'+{nx}+{ny}')
+        self.x, self.y = self.prev = nx, ny
+        self.draw(nx, ny)  # follow the pointer at once, not on the next frame
 
     def drop(self, _):
         self.vx, self.vy = max(-25, min(25, self.vx)), max(-25, min(25, self.vy))  # throw
@@ -508,16 +515,31 @@ class Pet:
             self.dir = random.choice((-1, 1))
 
     def tick(self):
+        """About 60 frames a second. Movement is worked out in fixed 1/30 s steps (so speeds stay the same and
+        Tk's uneven timer can't speed it up or slow it down); in between, the drawn position glides from the last
+        step to the next one."""
         if not self.alive:
             return
-        self.frame += 1
-        if self.state != 'drag':
-            self.step()
-            self.win.geometry(f'+{int(self.x)}+{int(self.y)}')
-        elif self.frame % 30 > 18:  # held still for a moment: wriggle to get free
-            self.win.geometry(f'+{int(self.x) + (2 if self.frame % 4 < 2 else -2)}+{int(self.y)}')
-        self.draw()
-        self.win.after(33, self.tick)
+        now = time.perf_counter()
+        dt, self.last = min(0.1, now - self.last), now
+        self.t += dt
+        x, y = self.x, self.y
+        if self.state == 'drag':
+            self.acc = 0.0
+            if self.t % 1 > 0.6:  # held still for a moment: wriggle to get free
+                x += 2 if self.t % 0.12 < 0.06 else -2
+        else:
+            self.acc += dt
+            while self.acc >= STEP:
+                self.prev = (self.x, self.y)
+                self.frame += 1
+                self.step()
+                self.acc -= STEP
+            a = self.acc / STEP
+            x = self.prev[0] + (self.x - self.prev[0]) * a
+            y = self.prev[1] + (self.y - self.prev[1]) * a
+        self.draw(x, y)
+        self.win.after(15, self.tick)
 
     def picture(self):
         """This tick's PIL picture of the pet."""
@@ -529,13 +551,16 @@ class Pet:
             pair = next((frames[k] for k in (s,) + STAND_INS.get(s, ()) if k in frames), frames['idle'])
             seq = pair[1] if d < 0 else pair[0]
             return seq[int(f * fps / 30) % len(seq)]
-        fast = s in ('run', 'chase')
-        step = 3 if s in ('walk', 'climb', 'ceiling', 'run', 'chase', 'dance') and f // (3 if fast else 5) % 2 else 0
+        step = 0
+        if s in ('walk', 'climb', 'ceiling', 'run', 'chase', 'dance'):
+            period = 0.2 if s in ('run', 'chase') else 0.34  # seconds per stride
+            phase = int(self.t % period / period * 12)  # 12 poses per stride, drawn once each and reused
+            step = round(3 * math.sin(2 * math.pi * phase / 12), 1)
         blink = f % 100 < 4 or s == 'sit' and f % 200 < 100 or s == 'lie'
         st = self.app.settings
         return self.app.blob_frame(s, 1 if d > 0 else -1, step, blink, st['style'], st['color'], self.px)
 
-    def draw(self):
+    def draw(self, x=None, y=None):
         if self.hwnd is None:
             self.win.update_idletasks()
             self.hwnd = user32.GetParent(self.win.winfo_id())  # the real window around Tk's frame
@@ -553,7 +578,7 @@ class Pet:
             if len(self.shown) > 600:
                 self.shown.clear()
             self.shown[key] = data
-        show_layered(self.hwnd, data, self.px, self.px)
+        show_layered(self.hwnd, data, self.px, self.px, self.x if x is None else x, self.y if y is None else y)
 
 
 def pet_px(settings):
@@ -616,7 +641,7 @@ def blob_image(size, color, style='Blob', f=50):
 def draw_blob(c, color, s='idle', d=1, f=0, step=0, style='Blob'):
     """The default pet at 64 px on canvas c: state s, facing d (-1/1), animation frame f, foot step offset,
     style one of BLOB_STYLES (ears, ghost tail)."""
-    top = 26 if s == 'sit' else 34 if s == 'lie' else 20 if s == 'ceiling' else 14 + (2 if step else 0)
+    top = 26 if s == 'sit' else 34 if s == 'lie' else 20 if s == 'ceiling' else 14 + abs(step) * 0.7
     if s == 'ceiling':  # hanging from the top edge: arms up, one hand forward per step
         c.create_line(24, top + 8, 22 + step, 0, fill=LINE, width=3)
         c.create_line(40, top + 8, 42 - step, 0, fill=LINE, width=3)
