@@ -83,7 +83,7 @@ def load_settings(path=None):
     checks = {
         'color': is_hex,
         'speed': num(0.5, 3), 'size': num(0.5, 2.5),
-        'pets': lambda v: num(1, 10)(v) and v == int(v),
+        'pets': lambda v: num(0, 10)(v) and v == int(v),
         'monitors': lambda v: isinstance(v, list) and all(isinstance(m, str) for m in v),
         'character': lambda v: isinstance(v, str) and re.fullmatch(r'[\w\- ]{0,40}', v),  # a pack folder name, never a path
         'style': lambda v: v in BLOB_STYLES,
@@ -110,8 +110,8 @@ def save_settings(s, path=None):
 
 def autostart(enable=None):
     """Read (enable=None) or set Windows' 'run at login' entry: the exe, or pythonw + this file when run from source."""
-    cmd = f'"{sys.executable}"' if FROZEN else \
-        f'"{os.path.join(os.path.dirname(sys.executable), "pythonw.exe")}" "{os.path.abspath(__file__)}"'
+    cmd = (f'"{sys.executable}"' if FROZEN else
+           f'"{os.path.join(os.path.dirname(sys.executable), "pythonw.exe")}" "{os.path.abspath(__file__)}"') + ' --startup'
     with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY, 0, winreg.KEY_READ | winreg.KEY_SET_VALUE) as k:
         if enable:
             winreg.SetValueEx(k, 'DesktopPet', 0, winreg.REG_SZ, cmd)
@@ -217,16 +217,25 @@ def apply_update(exe=None):
     return True
 
 
+k32 = ctypes.WinDLL('kernel32', use_last_error=True)
+k32.CreateMutexW.restype = k32.CreateEventW.restype = k32.OpenEventW.restype = ctypes.c_void_p
+SHOW_EVENT = 'DesktopPetShowSettings'  # a second launch sets this; the running app opens its Settings
+
+
 def single_instance():
-    """Hold a named lock for this process's lifetime. False if another copy already runs."""
-    k32 = ctypes.WinDLL('kernel32', use_last_error=True)
-    k32.CreateMutexW.restype = ctypes.c_void_p
+    """Hold a named lock for this process's lifetime. False if another copy already runs
+    (that copy is told to open its Settings window, so clicking the app again just brings it up)."""
     h = k32.CreateMutexW(None, True, 'DesktopPetSingleInstance')
     if ctypes.get_last_error() != 183:  # not ERROR_ALREADY_EXISTS: we own it
         return True
     wait = 10_000 if os.environ.get('DESKTOPPET_RESTART') else 0
     # 0 = got it, 0x80 = previous owner exited without releasing (also ours now)
-    return k32.WaitForSingleObject(ctypes.c_void_p(h), wait) in (0, 0x80)
+    if k32.WaitForSingleObject(ctypes.c_void_p(h), wait) in (0, 0x80):
+        return True
+    ev = k32.OpenEventW(0x0002, False, SHOW_EVENT)  # EVENT_MODIFY_STATE
+    if ev:
+        k32.SetEvent(ctypes.c_void_p(ev))
+    return False
 
 
 class Pet:
@@ -410,7 +419,9 @@ def draw_blob(c, color, s='idle', d=1, f=0, step=0, style='Blob'):
 
 
 class App:
-    def __init__(self, tray=True):
+    def __init__(self, tray=True, startup=False, window=True):
+        """startup: launched at Windows login, so bring back the saved pets quietly.
+        Otherwise (Start menu / taskbar) open Settings and wait for the user to send a pet out from Home."""
         self.root = tk.Tk()
         self.root.withdraw()
         if os.path.exists(LOGO):
@@ -430,11 +441,19 @@ class App:
         self.minutes = 0
         self.events = queue.Queue()  # tray icon runs in its own thread; it posts here, tk reads in poll()
         self.tray = start_tray(self) if tray else None
-        for _ in range(self.settings['pets']):
-            self.add(save=False)
+        self.show_event = k32.CreateEventW(None, False, False, SHOW_EVENT)
+        if tray and autostart():
+            autostart(True)  # refresh an older login entry so it carries --startup
+        if startup:
+            for _ in range(self.settings['pets']):
+                self.add(save=False)
+        else:
+            self.settings['pets'] = 0  # in memory only until a pet is sent out; the saved count is for login
         if FROZEN:
             threading.Thread(target=download_update, daemon=True).start()
         self.root.after(60_000, self.every_minute)
+        if window and not startup:
+            self.root.after(50, self.open_settings)
         self.poll()
 
     def poll(self):
@@ -444,6 +463,8 @@ class App:
                  'quit': self.quit}[self.events.get_nowait()]()
         except queue.Empty:
             pass
+        if self.show_event and k32.WaitForSingleObject(ctypes.c_void_p(self.show_event), 0) == 0:
+            self.open_settings()  # the app was launched again
         if self.root.winfo_exists():
             self.root.after(200, self.poll)
 
@@ -502,9 +523,10 @@ class App:
         for p in self.pets:
             p.resize()
             p.update_area()
-        while len(self.pets) < self.settings['pets']:
+        target = self.settings['pets']  # remove() rewrites the setting, so hold on to the goal
+        while len(self.pets) < target:
             self.add(save=False)
-        while len(self.pets) > self.settings['pets']:
+        while len(self.pets) > target:
             self.remove(self.pets[-1])
 
     def set_visible(self, on):
@@ -528,20 +550,25 @@ class App:
             self.root.destroy()
 
     def add(self, save=True):
+        if len(self.pets) >= 10:
+            return
         self.pets.append(Pet(self))
         if save:
-            self.settings['pets'] = min(10, len(self.pets))
+            self.settings['pets'] = len(self.pets)
             save_settings(self.settings)
 
     def remove(self, pet):
         pet.alive = False
         pet.win.destroy()
         self.pets.remove(pet)
-        if not self.pets:
-            self.quit()
-            return
-        self.settings['pets'] = min(10, len(self.pets))
+        self.settings['pets'] = len(self.pets)
         save_settings(self.settings)
+        self.quit_if_idle()
+
+    def quit_if_idle(self):
+        """No pets, no Settings window, no tray icon to come back from: nothing left to show, so exit."""
+        if not self.pets and not self.tray and not (self.panel and self.panel.win.winfo_exists()):
+            self.quit()
 
 
 def start_tray(app):
@@ -650,7 +677,7 @@ def selftest():
         # never touch the real settings or packs
         SETTINGS_FILE, PACKS_DIR = os.path.join(d, 'settings.json'), os.path.join(d, 'packs')
         CHARACTER_FILE = os.path.join(d, 'c.png')
-        app = App(tray=False)
+        app = App(tray=False, startup=True, window=False)
         check_packs(d)
         p = app.pets[0]
         L, T, R, B = p.area
@@ -671,6 +698,13 @@ def selftest():
         panel.change('size', 2.0)
         panel.change('pets', 3)
         assert p.px == 2 * SIZE and len(app.pets) == 3 and load_settings()['pets'] == 3
+        panel.show('home')
+        panel.spawn()  # clicking the character on Home
+        assert len(app.pets) == 4 and load_settings()['pets'] == 4
+        panel.change('pets', 0)  # no pets left must not quit while the window is open
+        assert not app.pets and app.root.winfo_exists()
+        panel.change('pets', 1)
+        p = app.pets[0]
         panel.change('character', 'Test pet')
         assert app.pack and len(app.pack[0]['idle'][0]) == 2
         for s in ('walk', 'climb', 'sit'):  # walk has its own image, climb/sit fall back to idle
@@ -694,13 +728,13 @@ if __name__ == '__main__':
             print('selftest FAILED:', repr(e))
             sys.exit(1)
     else:
+        if not single_instance():
+            sys.exit()  # already running: it opens its Settings window instead
         if FROZEN:
-            if not single_instance():
-                sys.exit()  # already running
             try:
                 os.remove(sys.executable + '.old')  # leftover from the last update
             except OSError:
                 pass
             if apply_update():  # update downloaded last run but never applied
                 sys.exit()
-        App().root.mainloop()
+        App(startup='--startup' in sys.argv).root.mainloop()
