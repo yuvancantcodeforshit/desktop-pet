@@ -4,7 +4,12 @@ Run: pythonw pet.py   (right-click a pet for Settings / Add / Remove / Quit)
 import ctypes, ctypes.wintypes, hashlib, io, json, math, os, random, shutil, subprocess, sys, tempfile, threading
 import tkinter as tk
 import urllib.request, winreg
-from tkinter import colorchooser, filedialog
+from tkinter import colorchooser, filedialog, ttk
+
+try:
+    import sv_ttk  # Windows 11 style theme for the Settings window
+except ImportError:
+    sv_ttk = None  # running from source without it: plain ttk look
 
 VERSION = '1.0.3'        # bump before each release; release.ps1 reads it
 REPO = 'yuvancantcodeforshit/desktop-pet'
@@ -143,9 +148,10 @@ def download_update(exe=None):
         return 'failed'  # offline, no release yet, bad manifest: keep running this version
 
 
-def apply_update():
-    """Swap in a verified DesktopPet.exe.new and start it. True if swapped (caller should exit)."""
-    exe = sys.executable
+def apply_update(exe=None):
+    """Swap in a verified DesktopPet.exe.new and start it. True if swapped (caller should exit).
+    If Windows refuses to start the new exe (e.g. Smart App Control blocks unsigned files), the old one is put back."""
+    exe = exe or sys.executable
     if not os.path.exists(exe + '.new'):
         return False
     try:
@@ -155,10 +161,15 @@ def apply_update():
         os.replace(exe + '.new', exe)
     except OSError:
         return False
-    # PYINSTALLER_RESET_ENVIRONMENT: new exe unpacks fresh instead of reusing this process's temp folder.
-    # DESKTOPPET_RESTART: new exe waits for this one to exit instead of quitting as a second copy.
-    subprocess.Popen([exe], cwd=os.path.dirname(exe),
-                     env=dict(os.environ, PYINSTALLER_RESET_ENVIRONMENT='1', DESKTOPPET_RESTART='1'))
+    try:
+        # PYINSTALLER_RESET_ENVIRONMENT: new exe unpacks fresh instead of reusing this process's temp folder.
+        # DESKTOPPET_RESTART: new exe waits for this one to exit instead of quitting as a second copy.
+        subprocess.Popen([exe], cwd=os.path.dirname(exe),
+                         env=dict(os.environ, PYINSTALLER_RESET_ENVIRONMENT='1', DESKTOPPET_RESTART='1'))
+    except OSError:  # blocked or broken: roll back so the pet keeps working
+        os.remove(exe)
+        os.replace(exe + '.old', exe)
+        return False
     return True
 
 
@@ -291,32 +302,37 @@ class Pet:
         if self.app.char_img:  # custom character from Settings: it hops while moving
             c.create_image(self.px // 2, self.px - step, anchor='s', image=self.app.char_img)
             return
-        top = 26 if s == 'sit' else 14 + (2 if step else 0)
-        # feet (dangle while dragged)
-        fy = 52 if s != 'drag' else 56
-        c.create_oval(16, fy - step, 28, fy + 8 - step, fill=LINE, outline='')
-        c.create_oval(36, fy - 3 + step, 48, fy + 5 + step, fill=LINE, outline='')
-        # body
-        c.create_oval(8, top, 56, 58, fill=self.app.settings['color'], outline=LINE, width=2)
-        # face, looks where it's going
-        ex, ey = 32 + d * 5, top + 16
-        if s == 'fall' or s == 'drag':
-            for dx in (-8, 8):
-                c.create_oval(ex + dx - 4, ey - 4, ex + dx + 4, ey + 4, fill='white', outline=LINE)
-                c.create_oval(ex + dx - 1, ey - 1, ex + dx + 1, ey + 1, fill=LINE, outline='')
-            c.create_oval(ex - 3, ey + 7, ex + 3, ey + 13, fill=LINE, outline='')  # "o" mouth
-        else:
-            blink = f % 100 < 4 or s == 'sit' and f % 200 < 100
-            for dx in (-8, 8):
-                if blink:
-                    c.create_line(ex + dx - 3, ey, ex + dx + 3, ey, fill=LINE, width=2)
-                else:
-                    c.create_oval(ex + dx - 3, ey - 3, ex + dx + 3, ey + 3, fill=LINE, outline='')
-            c.create_arc(ex - 4, ey + 3, ex + 4, ey + 11, start=200, extent=140, style='arc', outline=LINE, width=2)
-        for dx in (-14, 14):
-            c.create_oval(ex + dx - 3, ey + 4, ex + dx + 3, ey + 8, fill=CHEEK, outline='')
+        draw_blob(c, self.app.settings['color'], s, d, f, step)
         if self.px != SIZE:  # drawn at 64 px, then scaled to the size setting
             c.scale('all', 0, 0, self.px / SIZE, self.px / SIZE)
+
+
+def draw_blob(c, color, s='idle', d=1, f=0, step=0):
+    """The default pet at 64 px on canvas c: state s, facing d (-1/1), animation frame f, foot step offset."""
+    top = 26 if s == 'sit' else 14 + (2 if step else 0)
+    # feet (dangle while dragged)
+    fy = 52 if s != 'drag' else 56
+    c.create_oval(16, fy - step, 28, fy + 8 - step, fill=LINE, outline='')
+    c.create_oval(36, fy - 3 + step, 48, fy + 5 + step, fill=LINE, outline='')
+    # body
+    c.create_oval(8, top, 56, 58, fill=color, outline=LINE, width=2)
+    # face, looks where it's going
+    ex, ey = 32 + d * 5, top + 16
+    if s == 'fall' or s == 'drag':
+        for dx in (-8, 8):
+            c.create_oval(ex + dx - 4, ey - 4, ex + dx + 4, ey + 4, fill='white', outline=LINE)
+            c.create_oval(ex + dx - 1, ey - 1, ex + dx + 1, ey + 1, fill=LINE, outline='')
+        c.create_oval(ex - 3, ey + 7, ex + 3, ey + 13, fill=LINE, outline='')  # "o" mouth
+    else:
+        blink = f % 100 < 4 or s == 'sit' and f % 200 < 100
+        for dx in (-8, 8):
+            if blink:
+                c.create_line(ex + dx - 3, ey, ex + dx + 3, ey, fill=LINE, width=2)
+            else:
+                c.create_oval(ex + dx - 3, ey - 3, ex + dx + 3, ey + 3, fill=LINE, outline='')
+        c.create_arc(ex - 4, ey + 3, ex + 4, ey + 11, start=200, extent=140, style='arc', outline=LINE, width=2)
+    for dx in (-14, 14):
+        c.create_oval(ex + dx - 3, ey + 4, ex + dx + 3, ey + 8, fill=CHEEK, outline='')
 
 
 class SettingsWindow:
@@ -324,70 +340,117 @@ class SettingsWindow:
 
     def __init__(self, app):
         self.app, s = app, app.settings
-        w = self.win = tk.Toplevel(app.root)
+        if sv_ttk and not getattr(app, 'themed', False):
+            sv_ttk.set_theme('dark', app.root)
+            app.root.tk.call('configure_colors')  # theme hooks this to the root window, which we keep hidden
+            app.themed = True
+        # sun-valley frames are see-through and the theme only colors the main window, so paint this one ourselves
+        bg = '#1c1c1c' if sv_ttk else ttk.Style().lookup('TFrame', 'background')
+        w = self.win = tk.Toplevel(app.root, bg=bg)
         w.title('Desktop Pet settings')
         w.resizable(False, False)
         w.attributes('-topmost', True)
         w.protocol('WM_DELETE_WINDOW', self.close)
-        f = tk.Frame(w, padx=14, pady=10)
-        f.pack()
-        rows = iter(range(100))
+        outer = ttk.Frame(w, padding=14)
+        outer.pack()
 
-        def row(label, widget):
-            r = next(rows)
-            tk.Label(f, text=label).grid(row=r, column=0, sticky='nw', pady=4, padx=(0, 12))
-            widget.grid(row=r, column=1, sticky='w', pady=4)
+        # left: name, version and a live preview of the pet
+        side = ttk.Frame(outer)
+        side.grid(row=0, column=0, sticky='n', padx=(0, 14))
+        ttk.Label(side, text='Desktop Pet', font=('Segoe UI', 15, 'bold')).pack()
+        ttk.Label(side, text=f'v{VERSION}', foreground='gray').pack()
+        self.preview = tk.Canvas(side, width=120, height=120, bg=bg, highlightthickness=0)
+        self.preview.pack(pady=12)
 
-        self.color_btn = tk.Button(f, width=10, bg=s['color'], activebackground=s['color'], command=self.pick_color)
-        row('Color', self.color_btn)
-        for key, label, lo, hi, res in (('speed', 'Speed', 0.5, 3, 0.1), ('size', 'Size', 0.5, 2.5, 0.1),
-                                        ('pets', 'Number of pets', 1, 10, 1)):
-            sc = tk.Scale(f, from_=lo, to=hi, resolution=res, orient='horizontal', length=200)
+        body = ttk.Frame(outer)
+        body.grid(row=0, column=1)
+
+        def section(title):
+            f = ttk.LabelFrame(body, text=title, padding=(10, 6))
+            f.pack(fill='x', pady=4)
+            return f
+
+        def label(f, r, text):
+            ttk.Label(f, text=text, width=10).grid(row=r, column=0, sticky='w', pady=4)
+
+        def slider(f, r, key, text, lo, hi):
+            label(f, r, text)
+            value = ttk.Label(f, width=5)
+            show = lambda v: value.config(text=f'{v:g}' if key == 'pets' else f'{v:.1f}x')
+            sc = ttk.Scale(f, from_=lo, to=hi, length=180)
             sc.set(s[key])  # set before the callback is attached, so opening the window changes nothing
-            sc.config(command=lambda v, k=key: self.change(k, int(float(v)) if k == 'pets' else float(v)))
-            row(label, sc)
+            show(s[key])
 
-        cf = tk.Frame(f)
-        tk.Button(cf, text='Choose image...', command=self.pick_character).pack(side='left')
-        tk.Button(cf, text='Default blob', command=lambda: self.change('character', False)).pack(side='left', padx=6)
-        self.char_status = tk.Label(cf, fg='gray', text='custom image' if s['character'] else 'default')
-        self.char_status.pack(side='left')
-        row('Character', cf)
+            def moved(v, key=key):
+                v = int(round(float(v))) if key == 'pets' else round(float(v), 1)
+                show(v)
+                if v != self.app.settings[key]:
+                    self.change(key, v)
+            sc.config(command=moved)
+            sc.grid(row=r, column=1, padx=8)
+            value.grid(row=r, column=2)
 
-        mf = tk.Frame(f)
+        f = section('Look')
+        label(f, 0, 'Color')
+        self.swatch = tk.Canvas(f, width=64, height=24, bg=s['color'], highlightthickness=1,
+                                highlightbackground='gray', cursor='hand2')
+        self.swatch.bind('<Button-1>', lambda e: self.pick_color())
+        self.swatch.grid(row=0, column=1, sticky='w', padx=8, pady=4)
+        slider(f, 1, 'size', 'Size', 0.5, 2.5)
+        label(f, 2, 'Character')
+        cf = ttk.Frame(f)
+        cf.grid(row=2, column=1, columnspan=2, sticky='w', padx=8, pady=4)
+        ttk.Button(cf, text='Choose image...', command=self.pick_character).pack(side='left')
+        ttk.Button(cf, text='Default', command=lambda: self.change('character', False)).pack(side='left', padx=6)
+        self.char_status = ttk.Label(f, foreground='gray')
+        self.char_status.grid(row=3, column=1, columnspan=2, sticky='w', padx=8)
+
+        f = section('Behavior')
+        slider(f, 0, 'speed', 'Speed', 0.5, 3)
+        slider(f, 1, 'pets', 'Pets', 1, 10)
+
+        f = section('Screens')
         self.mon_vars = []
         for name, (L, T, R, B) in all_monitors():
             v = tk.BooleanVar(value=not s['monitors'] or name in s['monitors'])
-            tk.Checkbutton(mf, text=f'{name.replace(chr(92), "").replace(".", "")}  ({R - L}x{B - T})',
-                           variable=v, command=self.change_monitors).pack(anchor='w')
+            ttk.Checkbutton(f, text=f'{name.replace(chr(92), "").replace(".", "")}  ({R - L}x{B - T})',
+                            variable=v, command=self.change_monitors).pack(anchor='w', pady=2)
             self.mon_vars.append((name, v))
-        row('Show on monitors', mf)
 
+        f = section('App')
         self.auto = tk.BooleanVar(value=FROZEN and autostart())
-        row('Start with Windows', tk.Checkbutton(f, text='' if FROZEN else '(installed app only)', variable=self.auto,
-                                                 state='normal' if FROZEN else 'disabled',
-                                                 command=lambda: autostart(self.auto.get())))
+        ttk.Checkbutton(f, text='Start with Windows' + ('' if FROZEN else '  (installed app only)'),
+                        variable=self.auto, style='Switch.TCheckbutton' if sv_ttk else 'TCheckbutton',
+                        state='normal' if FROZEN else 'disabled',
+                        command=lambda: autostart(self.auto.get())).grid(row=0, column=0, columnspan=2, sticky='w', pady=4)
+        self.upd_btn = ttk.Button(f, text='Check for updates', command=self.check_updates,
+                                  style='Accent.TButton' if sv_ttk else 'TButton', state='normal' if FROZEN else 'disabled')
+        self.upd_btn.grid(row=1, column=0, sticky='w', pady=4)
+        self.upd_status = ttk.Label(f, foreground='gray', text='' if FROZEN else '(installed app only)')
+        self.upd_status.grid(row=1, column=1, padx=8)
+        self.refresh()
 
-        uf = tk.Frame(f)
-        tk.Label(uf, text=f'v{VERSION}').pack(side='left')
-        self.upd_btn = tk.Button(uf, text='Check now', command=self.check_updates,
-                                 state='normal' if FROZEN else 'disabled')
-        self.upd_btn.pack(side='left', padx=6)
-        self.upd_status = tk.Label(uf, fg='gray', text='' if FROZEN else '(installed app only)')
-        self.upd_status.pack(side='left')
-        row('Updates', uf)
-        tk.Button(f, text='Close', width=10, command=self.close).grid(row=next(rows), column=1, sticky='e', pady=(8, 0))
+    def refresh(self):
+        """Redraw the preview and character label from the current settings."""
+        s, c = self.app.settings, self.preview
+        self.char_status.config(text='Using your image' if self.app.char_img else '')
+        c.delete('all')
+        if self.app.char_img:
+            c.create_image(60, 115, anchor='s', image=self.app.char_img)
+        else:
+            draw_blob(c, s['color'], f=50)  # f=50: eyes open (frames 0-3 are a blink)
+            c.scale('all', 0, 0, 1.8, 1.8)
+            c.move('all', 2, 6)
 
     def change(self, key, value):
         self.app.settings[key] = value
-        if key == 'character':
-            self.char_status.config(text='custom image' if value else 'default')
         self.app.apply()
+        self.refresh()
 
     def pick_color(self):
         c = colorchooser.askcolor(self.app.settings['color'], parent=self.win)[1]
         if c:
-            self.color_btn.config(bg=c, activebackground=c)
+            self.swatch.config(bg=c)
             self.change('color', c)
 
     def pick_character(self):
@@ -534,6 +597,12 @@ def check_updater():
                 assert os.path.exists(exe + '.new') == want, f'sha {sha[:8]}: .new exists={not want}'
         finally:
             urllib.request.urlopen = real
+        # an update Windows refuses to run must be rolled back, not left in place
+        with open(exe, 'wb') as f:
+            f.write(b'current')  # .new from above is not a real exe, so starting it fails
+        assert not apply_update(exe), 'unstartable update reported as applied'
+        with open(exe, 'rb') as f:
+            assert f.read() == b'current', 'old exe not restored after failed update'
 
 
 def check_settings(d):

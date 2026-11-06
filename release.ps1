@@ -16,16 +16,34 @@ if (-not $old) { throw 'VERSION not found in pet.py' }
 if ([version]$Version -lt [version]$old) { throw "Version must not be lower than the current $old" }
 if ((git branch --show-current) -ne 'main') { throw 'Switch to main first: git switch main' }
 
+python -c "import sv_ttk" 2>$null
+if ($LASTEXITCODE) { throw 'Settings theme missing: python -m pip install --user sv-ttk' }
 python pet.py --selftest
 if ($LASTEXITCODE) { throw 'selftest failed' }
 
 [IO.File]::WriteAllText("$PWD\pet.py", ($src -replace "VERSION = '[\d.]+'", "VERSION = '$Version'"))
 
+# Code signing with Azure Artifact Signing, once signing\metadata.json exists (setup: README > Code signing).
+# Signed exes pass Smart App Control and skip the SmartScreen warning. Without it, builds ship unsigned.
+function Sign($file) {
+    if (-not (Test-Path signing\metadata.json)) { "Not signing $file (no signing\metadata.json)"; return }
+    $kits = "${env:ProgramFiles(x86)}\Windows Kits\10\bin"
+    $signtool = $env:SIGNTOOL
+    if (-not $signtool) { $signtool = (Get-ChildItem $kits -Recurse -Filter signtool.exe -EA 0 | Where-Object FullName -match '\\x64\\' | Select-Object -Last 1).FullName }
+    $dlib = $env:SIGN_DLIB
+    if (-not $dlib) { $dlib = (Get-ChildItem $env:ProgramFiles, ${env:ProgramFiles(x86)}, $env:LOCALAPPDATA -Recurse -Filter Azure.CodeSigning.Dlib.dll -EA 0 | Where-Object FullName -match 'x64' | Select-Object -First 1).FullName }
+    if (-not $signtool -or -not $dlib) { throw 'signtool or Azure.CodeSigning.Dlib.dll not found: winget install -e --id Microsoft.Azure.ArtifactSigningClientTools (or set SIGNTOOL / SIGN_DLIB)' }
+    & $signtool sign /v /fd SHA256 /tr http://timestamp.acs.microsoft.com /td SHA256 /dlib $dlib /dmdf signing\metadata.json $file
+    if ($LASTEXITCODE) { throw "signing $file failed (signed in with az login?)" }
+}
+
 $w = "$env:TEMP\petbuild"
-python -m PyInstaller --onefile --noconsole --name DesktopPet --distpath dist --workpath $w --specpath $w --log-level ERROR pet.py
+python -m PyInstaller --onefile --noconsole --name DesktopPet --distpath dist --workpath $w --specpath $w --log-level ERROR --collect-data sv_ttk pet.py
 if ($LASTEXITCODE) { throw 'building DesktopPet.exe failed' }
+Sign dist\DesktopPet.exe  # before hashing and before the installer bundles it
 # Test the packed exe too: a broken build would ship to every pet and could never update itself again.
-if ((Start-Process dist\DesktopPet.exe -ArgumentList '--selftest' -Wait -PassThru).ExitCode) { throw 'built DesktopPet.exe failed its selftest' }
+# -ErrorAction Stop: a build Windows refuses to start (Smart App Control) throws instead of slipping through.
+if ((Start-Process dist\DesktopPet.exe -ArgumentList '--selftest' -Wait -PassThru -ErrorAction Stop).ExitCode) { throw 'built DesktopPet.exe failed its selftest' }
 
 $hash = (Get-FileHash dist\DesktopPet.exe -Algorithm SHA256).Hash.ToLower()
 @{ version = $Version; sha256 = $hash } | ConvertTo-Json | Set-Content dist\latest.json -Encoding ascii
@@ -33,6 +51,7 @@ $hash = (Get-FileHash dist\DesktopPet.exe -Algorithm SHA256).Hash.ToLower()
 python -m PyInstaller --onefile --noconsole --name DesktopPetSetup --distpath dist --workpath $w --specpath $w --log-level ERROR `
     --add-data "$PWD\dist\DesktopPet.exe;." --add-data "$PWD\install.cmd;." --add-data "$PWD\uninstall.cmd;." installer.py
 if ($LASTEXITCODE) { throw 'building DesktopPetSetup.exe failed' }
+Sign dist\DesktopPetSetup.exe
 
 git add -A
 git commit -q -m "Release v$Version"
