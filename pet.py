@@ -1,15 +1,11 @@
 """Desktop pet: walks on the taskbar, climbs screen edges, falls, can be dragged and thrown.
-Run: pythonw pet.py   (right-click a pet for Settings / Add / Remove / Quit)
+Run: pythonw pet.py   (right-click a pet for Settings / Add / Remove / Quit; tray icon too)
 """
-import ctypes, ctypes.wintypes, hashlib, io, json, math, os, random, shutil, subprocess, sys, tempfile, threading
+import ctypes, ctypes.wintypes, hashlib, io, json, os, queue, random, re, shutil, subprocess, sys, tempfile, threading
 import tkinter as tk
 import urllib.request, winreg
-from tkinter import colorchooser, filedialog, ttk
 
-try:
-    import sv_ttk  # Windows 11 style theme for the Settings window
-except ImportError:
-    sv_ttk = None  # running from source without it: plain ttk look
+import packs
 
 VERSION = '1.0.3'        # bump before each release; release.ps1 reads it
 REPO = 'yuvancantcodeforshit/desktop-pet'
@@ -25,13 +21,28 @@ LINE, CHEEK = '#2f6b3c', '#f4a6b8'
 
 SETTINGS_DIR = os.path.join(os.environ.get('APPDATA') or os.path.expanduser('~'), 'DesktopPet')
 SETTINGS_FILE = os.path.join(SETTINGS_DIR, 'settings.json')
-CHARACTER_FILE = os.path.join(SETTINGS_DIR, 'character.png')
-DEFAULTS = {'color': '#7ecf8f', 'speed': 1.0, 'size': 1.0, 'pets': 1, 'monitors': [], 'character': False}
-MAX_IMAGE = 2048         # px; bigger character images would eat memory
+PACKS_DIR = os.path.join(SETTINGS_DIR, 'characters')
+CHARACTER_FILE = os.path.join(SETTINGS_DIR, 'character.png')  # single image from v1.0.3, moved into a pack on start
+BLOB_STYLES = ('Blob', 'Cat', 'Ghost', 'Bunny')
+# window themes: background, card, accent, text, muted text
+THEMES = {
+    'Midnight': ('#1c1c1c', '#2b2b2b', '#57c8ff', '#ffffff', '#9a9a9a'),
+    'Ocean':    ('#0f1b2d', '#172a45', '#4fc3f7', '#ffffff', '#8fa3bf'),
+    'Forest':   ('#13201a', '#1d3328', '#7ecf8f', '#ffffff', '#8fae9a'),
+    'Sunset':   ('#2a1a1f', '#3d2630', '#ff9e7a', '#ffffff', '#b8949e'),
+    'Grape':    ('#1d1730', '#2b2245', '#b9a3f0', '#ffffff', '#9d93b8'),
+    'Light':    ('#f3f3f3', '#ffffff', '#2f60d8', '#1a1a1a', '#666666'),
+}
+DEFAULTS = {'color': '#7ecf8f', 'speed': 1.0, 'size': 1.0, 'pets': 1, 'monitors': [], 'character': '',
+            'style': 'Blob', 'theme': 'Midnight', 'accent': '', 'font': 'Segoe UI'}
 RUN_KEY = r'Software\Microsoft\Windows\CurrentVersion\Run'
 
 
 # --- settings ---
+def is_hex(v):
+    return isinstance(v, str) and len(v) == 7 and v[0] == '#' and all(c in '0123456789abcdefABCDEF' for c in v[1:])
+
+
 def load_settings(path=None):
     """Saved settings over defaults. Anything missing, mistyped or out of range falls back to its default."""
     s = dict(DEFAULTS)
@@ -44,16 +55,21 @@ def load_settings(path=None):
         return s
     num = lambda lo, hi: lambda v: isinstance(v, (int, float)) and not isinstance(v, bool) and lo <= v <= hi
     checks = {
-        'color': lambda v: isinstance(v, str) and len(v) == 7 and v[0] == '#'
-                           and all(c in '0123456789abcdefABCDEF' for c in v[1:]),
+        'color': is_hex,
         'speed': num(0.5, 3), 'size': num(0.5, 2.5),
         'pets': lambda v: num(1, 10)(v) and v == int(v),
         'monitors': lambda v: isinstance(v, list) and all(isinstance(m, str) for m in v),
-        'character': lambda v: isinstance(v, bool),
+        'character': lambda v: isinstance(v, str) and re.fullmatch(r'[\w\- ]{0,40}', v),  # a pack folder name, never a path
+        'style': lambda v: v in BLOB_STYLES,
+        'theme': lambda v: v in THEMES,
+        'accent': lambda v: v == '' or is_hex(v),
+        'font': lambda v: isinstance(v, str) and 0 < len(v) <= 60,
     }
     for k, ok in checks.items():
         if k in saved and ok(saved[k]):
             s[k] = saved[k]
+    if saved.get('character') is True:  # v1.0.3 kept one custom image; it becomes a pack at startup
+        s['character'] = '__migrate__'
     s['pets'] = int(s['pets'])
     return s
 
@@ -67,10 +83,12 @@ def save_settings(s, path=None):
 
 
 def autostart(enable=None):
-    """Read (enable=None) or set Windows' 'run at login' entry for the installed exe."""
+    """Read (enable=None) or set Windows' 'run at login' entry: the exe, or pythonw + this file when run from source."""
+    cmd = f'"{sys.executable}"' if FROZEN else \
+        f'"{os.path.join(os.path.dirname(sys.executable), "pythonw.exe")}" "{os.path.abspath(__file__)}"'
     with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY, 0, winreg.KEY_READ | winreg.KEY_SET_VALUE) as k:
         if enable:
-            winreg.SetValueEx(k, 'DesktopPet', 0, winreg.REG_SZ, f'"{sys.executable}"')
+            winreg.SetValueEx(k, 'DesktopPet', 0, winreg.REG_SZ, cmd)
         elif enable is False:
             try:
                 winreg.DeleteValue(k, 'DesktopPet')
@@ -205,6 +223,8 @@ class Pet:
         self.cv.bind('<B1-Motion>', self.drag)
         self.cv.bind('<ButtonRelease-1>', self.drop)
         self.cv.bind('<Button-3>', self.menu)
+        if not app.visible:
+            w.withdraw()
         self.tick()
 
     def set(self, state):
@@ -246,7 +266,7 @@ class Pet:
         m.add_command(label='Add pet', command=self.app.add)
         m.add_command(label='Remove this pet', command=lambda: self.app.remove(self))
         m.add_separator()
-        m.add_command(label='Quit', command=self.app.root.destroy)
+        m.add_command(label='Quit', command=self.app.quit)
         m.tk_popup(e.x_root, e.y_root)
 
     # --- behaviour ---
@@ -297,25 +317,49 @@ class Pet:
     def draw(self):
         c, d, f, s = self.cv, self.dir, self.frame, self.state
         c.delete('all')
+        if self.app.pack:  # character pack: that state's animation, mirrored when facing left
+            draw_pack(c, self.app.pack, s, d, f, self.px)
+            return
         moving = s in ('walk', 'climb')
         step = 3 if moving and f // 5 % 2 else 0
-        if self.app.char_img:  # custom character from Settings: it hops while moving
-            c.create_image(self.px // 2, self.px - step, anchor='s', image=self.app.char_img)
-            return
-        draw_blob(c, self.app.settings['color'], s, d, f, step)
+        draw_blob(c, self.app.settings['color'], s, d, f, step, self.app.settings['style'])
         if self.px != SIZE:  # drawn at 64 px, then scaled to the size setting
             c.scale('all', 0, 0, self.px / SIZE, self.px / SIZE)
 
 
-def draw_blob(c, color, s='idle', d=1, f=0, step=0):
-    """The default pet at 64 px on canvas c: state s, facing d (-1/1), animation frame f, foot step offset."""
+def draw_pack(c, pack, s, d, f, px, x=None):
+    """One frame of a loaded pack ((frames, fps) from packs.load_frames) on canvas c, feet at the bottom."""
+    frames, fps = pack
+    right, left = frames.get(s) or frames['idle']
+    seq = left if d < 0 else right
+    c.create_image(px // 2 if x is None else x, px, anchor='s', image=seq[int(f * fps / 30) % len(seq)])
+
+
+def draw_blob(c, color, s='idle', d=1, f=0, step=0, style='Blob'):
+    """The default pet at 64 px on canvas c: state s, facing d (-1/1), animation frame f, foot step offset,
+    style one of BLOB_STYLES (ears, ghost tail)."""
     top = 26 if s == 'sit' else 14 + (2 if step else 0)
-    # feet (dangle while dragged)
-    fy = 52 if s != 'drag' else 56
-    c.create_oval(16, fy - step, 28, fy + 8 - step, fill=LINE, outline='')
-    c.create_oval(36, fy - 3 + step, 48, fy + 5 + step, fill=LINE, outline='')
-    # body
-    c.create_oval(8, top, 56, 58, fill=color, outline=LINE, width=2)
+    if style == 'Cat':  # ears behind the body
+        for x0, x1, x2 in ((12, 18, 28), (36, 46, 52)):
+            c.create_polygon(x0, top + 10, x1, top - 8, x2, top + 2, fill=color, outline=LINE, width=2)
+    elif style == 'Bunny':
+        for x in (20, 44):
+            c.create_oval(x - 5, top - 14, x + 5, top + 12, fill=color, outline=LINE, width=2)
+            c.create_oval(x - 2, top - 9, x + 2, top + 6, fill=CHEEK, outline='')
+    if style == 'Ghost':  # no feet: rounded top, wavy hem
+        c.create_oval(8, top, 56, top + 40, fill=color, outline=LINE, width=2)
+        c.create_rectangle(9, top + 20, 55, 52, fill=color, outline='')
+        c.create_line(8, top + 20, 8, 54, fill=LINE, width=2)
+        c.create_line(56, top + 20, 56, 54, fill=LINE, width=2)
+        for x in (8, 24, 40):
+            c.create_oval(x, 46 - step, x + 16, 60 - step, fill=color, outline='')
+    else:
+        # feet (dangle while dragged)
+        fy = 52 if s != 'drag' else 56
+        c.create_oval(16, fy - step, 28, fy + 8 - step, fill=LINE, outline='')
+        c.create_oval(36, fy - 3 + step, 48, fy + 5 + step, fill=LINE, outline='')
+        # body
+        c.create_oval(8, top, 56, 58, fill=color, outline=LINE, width=2)
     # face, looks where it's going
     ex, ey = 32 + d * 5, top + 16
     if s == 'fall' or s == 'drag':
@@ -333,183 +377,47 @@ def draw_blob(c, color, s='idle', d=1, f=0, step=0):
         c.create_arc(ex - 4, ey + 3, ex + 4, ey + 11, start=200, extent=140, style='arc', outline=LINE, width=2)
     for dx in (-14, 14):
         c.create_oval(ex + dx - 3, ey + 4, ex + dx + 3, ey + 8, fill=CHEEK, outline='')
-
-
-class SettingsWindow:
-    """Right-click > Settings. Every change applies to the pets at once and is saved."""
-
-    def __init__(self, app):
-        self.app, s = app, app.settings
-        if sv_ttk and not getattr(app, 'themed', False):
-            sv_ttk.set_theme('dark', app.root)
-            app.root.tk.call('configure_colors')  # theme hooks this to the root window, which we keep hidden
-            app.themed = True
-        # sun-valley frames are see-through and the theme only colors the main window, so paint this one ourselves
-        bg = '#1c1c1c' if sv_ttk else ttk.Style().lookup('TFrame', 'background')
-        w = self.win = tk.Toplevel(app.root, bg=bg)
-        w.title('Desktop Pet settings')
-        w.resizable(False, False)
-        w.attributes('-topmost', True)
-        w.protocol('WM_DELETE_WINDOW', self.close)
-        outer = ttk.Frame(w, padding=14)
-        outer.pack()
-
-        # left: name, version and a live preview of the pet
-        side = ttk.Frame(outer)
-        side.grid(row=0, column=0, sticky='n', padx=(0, 14))
-        ttk.Label(side, text='Desktop Pet', font=('Segoe UI', 15, 'bold')).pack()
-        ttk.Label(side, text=f'v{VERSION}', foreground='gray').pack()
-        self.preview = tk.Canvas(side, width=120, height=120, bg=bg, highlightthickness=0)
-        self.preview.pack(pady=12)
-
-        body = ttk.Frame(outer)
-        body.grid(row=0, column=1)
-
-        def section(title):
-            f = ttk.LabelFrame(body, text=title, padding=(10, 6))
-            f.pack(fill='x', pady=4)
-            return f
-
-        def label(f, r, text):
-            ttk.Label(f, text=text, width=10).grid(row=r, column=0, sticky='w', pady=4)
-
-        def slider(f, r, key, text, lo, hi):
-            label(f, r, text)
-            value = ttk.Label(f, width=5)
-            show = lambda v: value.config(text=f'{v:g}' if key == 'pets' else f'{v:.1f}x')
-            sc = ttk.Scale(f, from_=lo, to=hi, length=180)
-            sc.set(s[key])  # set before the callback is attached, so opening the window changes nothing
-            show(s[key])
-
-            def moved(v, key=key):
-                v = int(round(float(v))) if key == 'pets' else round(float(v), 1)
-                show(v)
-                if v != self.app.settings[key]:
-                    self.change(key, v)
-            sc.config(command=moved)
-            sc.grid(row=r, column=1, padx=8)
-            value.grid(row=r, column=2)
-
-        f = section('Look')
-        label(f, 0, 'Color')
-        self.swatch = tk.Canvas(f, width=64, height=24, bg=s['color'], highlightthickness=1,
-                                highlightbackground='gray', cursor='hand2')
-        self.swatch.bind('<Button-1>', lambda e: self.pick_color())
-        self.swatch.grid(row=0, column=1, sticky='w', padx=8, pady=4)
-        slider(f, 1, 'size', 'Size', 0.5, 2.5)
-        label(f, 2, 'Character')
-        cf = ttk.Frame(f)
-        cf.grid(row=2, column=1, columnspan=2, sticky='w', padx=8, pady=4)
-        ttk.Button(cf, text='Choose image...', command=self.pick_character).pack(side='left')
-        ttk.Button(cf, text='Default', command=lambda: self.change('character', False)).pack(side='left', padx=6)
-        self.char_status = ttk.Label(f, foreground='gray')
-        self.char_status.grid(row=3, column=1, columnspan=2, sticky='w', padx=8)
-
-        f = section('Behavior')
-        slider(f, 0, 'speed', 'Speed', 0.5, 3)
-        slider(f, 1, 'pets', 'Pets', 1, 10)
-
-        f = section('Screens')
-        self.mon_vars = []
-        for name, (L, T, R, B) in all_monitors():
-            v = tk.BooleanVar(value=not s['monitors'] or name in s['monitors'])
-            ttk.Checkbutton(f, text=f'{name.replace(chr(92), "").replace(".", "")}  ({R - L}x{B - T})',
-                            variable=v, command=self.change_monitors).pack(anchor='w', pady=2)
-            self.mon_vars.append((name, v))
-
-        f = section('App')
-        self.auto = tk.BooleanVar(value=FROZEN and autostart())
-        ttk.Checkbutton(f, text='Start with Windows' + ('' if FROZEN else '  (installed app only)'),
-                        variable=self.auto, style='Switch.TCheckbutton' if sv_ttk else 'TCheckbutton',
-                        state='normal' if FROZEN else 'disabled',
-                        command=lambda: autostart(self.auto.get())).grid(row=0, column=0, columnspan=2, sticky='w', pady=4)
-        self.upd_btn = ttk.Button(f, text='Check for updates', command=self.check_updates,
-                                  style='Accent.TButton' if sv_ttk else 'TButton', state='normal' if FROZEN else 'disabled')
-        self.upd_btn.grid(row=1, column=0, sticky='w', pady=4)
-        self.upd_status = ttk.Label(f, foreground='gray', text='' if FROZEN else '(installed app only)')
-        self.upd_status.grid(row=1, column=1, padx=8)
-        self.refresh()
-
-    def refresh(self):
-        """Redraw the preview and character label from the current settings."""
-        s, c = self.app.settings, self.preview
-        self.char_status.config(text='Using your image' if self.app.char_img else '')
-        c.delete('all')
-        if self.app.char_img:
-            c.create_image(60, 115, anchor='s', image=self.app.char_img)
-        else:
-            draw_blob(c, s['color'], f=50)  # f=50: eyes open (frames 0-3 are a blink)
-            c.scale('all', 0, 0, 1.8, 1.8)
-            c.move('all', 2, 6)
-
-    def change(self, key, value):
-        self.app.settings[key] = value
-        self.app.apply()
-        self.refresh()
-
-    def pick_color(self):
-        c = colorchooser.askcolor(self.app.settings['color'], parent=self.win)[1]
-        if c:
-            self.swatch.config(bg=c)
-            self.change('color', c)
-
-    def pick_character(self):
-        path = filedialog.askopenfilename(parent=self.win, title='Choose a character image',
-                                          filetypes=[('PNG or GIF image', '*.png *.gif')])
-        if not path:
-            return
-        try:  # only copy files Tk can actually show, at a sane size
-            img = tk.PhotoImage(file=path)
-        except tk.TclError:
-            self.char_status.config(text='not a PNG/GIF image')
-            return
-        if max(img.width(), img.height()) > MAX_IMAGE:
-            self.char_status.config(text=f'too big (max {MAX_IMAGE} px)')
-            return
-        os.makedirs(SETTINGS_DIR, exist_ok=True)
-        shutil.copyfile(path, CHARACTER_FILE)
-        self.app.settings['character'] = False  # force a reload even if a custom image was already set
-        self.change('character', True)
-
-    def change_monitors(self):
-        on = [name for name, v in self.mon_vars if v.get()]
-        self.change('monitors', [] if len(on) in (0, len(self.mon_vars)) else on)  # [] = all monitors
-
-    def check_updates(self):
-        self.upd_btn.config(state='disabled')
-        self.upd_status.config(text='checking...')
-        result = []
-        threading.Thread(target=lambda: result.append(download_update()), daemon=True).start()
-
-        def wait():  # tkinter is not thread-safe: the thread only fills `result`, the UI reads it here
-            if not result:
-                self.app.root.after(300, wait)
-            elif result[0] == 'downloaded' and apply_update():
-                self.app.root.destroy()  # the new version starts on its own
-            elif self.win.winfo_exists():
-                self.upd_status.config(text={'latest': 'up to date', 'failed': "couldn't check"}.get(result[0], ''))
-                self.upd_btn.config(state='normal')
-        wait()
-
-    def close(self):
-        self.win.destroy()
-        self.app.panel = None
+    if style == 'Cat':  # whiskers
+        for dy in (6, 9):
+            c.create_line(ex - 22, ey + dy, ex - 15, ey + dy, fill=LINE)
+            c.create_line(ex + 15, ey + dy, ex + 22, ey + dy, fill=LINE)
 
 
 class App:
-    def __init__(self):
+    def __init__(self, tray=True):
         self.root = tk.Tk()
         self.root.withdraw()
+        try:  # drag-and-drop for the Characters tab; the app works without it
+            from tkinterdnd2 import TkinterDnD
+            TkinterDnD._require(self.root)
+            self.dnd = True
+        except Exception:
+            self.dnd = False
         self.settings = load_settings()
+        self.migrate_character()
         self.load_character()
         self.pets = []
         self.panel = None
+        self.visible = True
         self.minutes = 0
+        self.events = queue.Queue()  # tray icon runs in its own thread; it posts here, tk reads in poll()
+        self.tray = start_tray(self) if tray else None
         for _ in range(self.settings['pets']):
             self.add(save=False)
         if FROZEN:
             threading.Thread(target=download_update, daemon=True).start()
         self.root.after(60_000, self.every_minute)
+        self.poll()
+
+    def poll(self):
+        try:
+            while True:
+                {'open': self.open_settings, 'toggle': lambda: self.set_visible(not self.visible),
+                 'quit': self.quit}[self.events.get_nowait()]()
+        except queue.Empty:
+            pass
+        if self.root.winfo_exists():
+            self.root.after(200, self.poll)
 
     def every_minute(self):
         for p in self.pets:  # resolution, taskbar or monitor layout may have changed
@@ -518,7 +426,7 @@ class App:
         self.minutes += 1
         if FROZEN:  # only the installed exe self-updates, not `python pet.py`
             if apply_update():
-                self.root.destroy()
+                self.quit()
                 return
             if self.minutes % 360 == 0:  # pets left running for days still get updates (every 6 h)
                 threading.Thread(target=download_update, daemon=True).start()
@@ -532,21 +440,32 @@ class App:
     def allowed_areas(self):
         return [area for name, area in all_monitors() if self.allowed(name)]
 
-    def load_character(self):
-        """Custom character image, scaled to roughly the pet size. None means draw the blob."""
-        self.char_img = None
-        if not self.settings['character']:
+    def migrate_character(self):
+        """v1.0.3's single custom image becomes a pack named 'My image'."""
+        if self.settings['character'] != '__migrate__':
             return
-        try:
-            img = tk.PhotoImage(file=CHARACTER_FILE)
-        except tk.TclError:
-            return  # file missing or broken: fall back to the blob
-        px, big = int(SIZE * self.settings['size']), max(img.width(), img.height())
-        if big > px:
-            img = img.subsample(math.ceil(big / px))
-        elif big * 2 <= px:
-            img = img.zoom(px // big)
-        self.char_img = img
+        self.settings['character'] = ''
+        if os.path.exists(CHARACTER_FILE):
+            dest = os.path.join(PACKS_DIR, 'My image')
+            os.makedirs(dest, exist_ok=True)
+            shutil.copyfile(CHARACTER_FILE, os.path.join(dest, 'idle.png'))
+            self.settings['character'] = 'My image'
+        save_settings(self.settings)
+
+    def load_character(self):
+        """Load the chosen pack at the current size into self.pack; None means draw the blob."""
+        name = self.settings['character']
+        key = (name, self.settings['size'])
+        if key == getattr(self, 'pack_key', None):
+            return  # unchanged: sliders call apply() many times per second, don't reload images each time
+        self.pack_key, self.pack = key, None
+        if name and os.path.isdir(os.path.join(PACKS_DIR, name)):
+            try:
+                self.pack = packs.load_frames(os.path.join(PACKS_DIR, name), int(SIZE * self.settings['size']))
+            except Exception:
+                self.pack = None  # broken pack: fall back to the blob rather than crash the pets
+            if self.pack and 'idle' not in self.pack[0]:
+                self.pack = None
 
     def apply(self):
         """Save settings and push them to every pet. The Settings window calls this on each change."""
@@ -560,11 +479,25 @@ class App:
         while len(self.pets) > self.settings['pets']:
             self.remove(self.pets[-1])
 
-    def open_settings(self):
-        if self.panel:
-            self.panel.win.lift()
+    def set_visible(self, on):
+        self.visible = on
+        for p in self.pets:
+            p.win.deiconify() if on else p.win.withdraw()
+        if self.tray:
+            self.tray.update_menu()
+
+    def open_settings(self, tab='home'):
+        if self.panel and self.panel.win.winfo_exists():
+            self.panel.show(tab)
         else:
-            self.panel = SettingsWindow(self)
+            from panel import SettingsWindow  # imported here: customtkinter is only needed once the window opens
+            self.panel = SettingsWindow(self, sys.modules[__name__], tab)
+
+    def quit(self):
+        if self.tray:
+            self.tray.stop()
+        if self.root.winfo_exists():
+            self.root.destroy()
 
     def add(self, save=True):
         self.pets.append(Pet(self))
@@ -577,10 +510,32 @@ class App:
         pet.win.destroy()
         self.pets.remove(pet)
         if not self.pets:
-            self.root.destroy()
+            self.quit()
             return
         self.settings['pets'] = min(10, len(self.pets))
         save_settings(self.settings)
+
+
+def start_tray(app):
+    """Tray icon next to the clock: click = Settings; menu = Settings, Show pets, Quit. None if pystray is missing."""
+    try:
+        import pystray
+        from PIL import Image, ImageDraw
+    except ImportError:
+        return None
+    img = Image.new('RGBA', (64, 64), (0, 0, 0, 0))
+    d = ImageDraw.Draw(img)
+    d.ellipse((6, 10, 58, 60), fill=app.settings['color'], outline=LINE, width=4)
+    for x in (22, 38):
+        d.ellipse((x - 4, 28, x + 4, 36), fill=LINE)
+    post = lambda ev: (lambda icon, item: app.events.put(ev))
+    icon = pystray.Icon('DesktopPet', img, 'Desktop Pet', pystray.Menu(
+        pystray.MenuItem('Settings', post('open'), default=True),
+        pystray.MenuItem('Show pets', post('toggle'), checked=lambda item: app.visible),
+        pystray.Menu.SEPARATOR,
+        pystray.MenuItem('Quit', post('quit'))))
+    icon.run_detached()
+    return icon
 
 
 def check_updater():
@@ -609,24 +564,70 @@ def check_settings(d):
     """Bad or hostile settings files fall back to defaults; good ones round-trip."""
     path = os.path.join(d, 's.json')
     assert load_settings(path) == DEFAULTS  # missing file
-    for junk in ('not json', '[1, 2]', '{"color": "red; rm", "size": 99, "pets": 2.5, "speed": true}'):
+    for junk in ('not json', '[1, 2]', '{"color": "red; rm", "size": 99, "pets": 2.5, "speed": true}',
+                 '{"character": "..\\\\..\\\\Windows", "theme": "Nope", "style": 3, "accent": "blue"}'):
         with open(path, 'w') as f:
             f.write(junk)
         assert load_settings(path) == DEFAULTS, junk
-    good = dict(DEFAULTS, color='#ff0000', size=2.0, pets=3, monitors=['\\\\.\\DISPLAY2'], character=True)
+    good = dict(DEFAULTS, color='#ff0000', size=2.0, pets=3, monitors=['\\\\.\\DISPLAY2'], character='My cat',
+                style='Ghost', theme='Ocean', accent='#123456', font='Bahnschrift')
     save_settings(good, path)
     assert load_settings(path) == good
 
 
+def check_packs(d):
+    """Import from a folder and a .zip, refuse junk and zip paths that escape, load and delete."""
+    import zipfile
+    from PIL import Image
+    src, dest = os.path.join(d, 'src'), os.path.join(d, 'packs')
+    os.makedirs(src)
+    os.makedirs(dest)
+    frames = [Image.new('RGBA', (40, 30), c) for c in ('red', 'blue')]
+    frames[0].save(os.path.join(src, 'idle.gif'), save_all=True, append_images=frames[1:], duration=100, loop=0)
+    Image.new('RGBA', (30, 40), 'green').save(os.path.join(src, 'walk.png'))
+    with open(os.path.join(src, 'pack.json'), 'w') as f:
+        json.dump({'name': 'Test pet', 'author': 'me', 'fps': 12}, f)
+    assert packs.import_pack(src, dest) == 'Test pet'
+    z = os.path.join(d, 'zipped.zip')
+    with zipfile.ZipFile(z, 'w') as zf:
+        zf.write(os.path.join(src, 'idle.gif'), 'inner/idle.gif')
+        zf.writestr('../../evil.png', b'x')  # must never be written outside the pack
+        zf.writestr('notes.txt', b'ignored')
+    assert packs.import_pack(z, dest) == 'zipped'
+    assert sorted(os.listdir(os.path.join(dest, 'zipped'))) == ['idle.gif'] and not os.path.exists(os.path.join(d, 'evil.png'))
+    for bad in (os.path.join(d, 'nothing.zip'), d):  # no idle image
+        if bad.endswith('.zip'):
+            with zipfile.ZipFile(bad, 'w') as zf:
+                zf.writestr('walk.txt', b'x')
+        try:
+            packs.import_pack(bad, dest)
+            raise AssertionError(f'{bad} should be refused')
+        except ValueError:
+            pass
+    loaded, fps = packs.load_frames(os.path.join(dest, 'Test pet'), 64)
+    assert fps == 12 and len(loaded['idle'][0]) == 2 and max(loaded['idle'][0][0].width(), loaded['idle'][0][0].height()) == 64
+    assert [n for n, _ in packs.list_packs(dest)] == ['Test pet', 'zipped']
+    packs.delete_pack(dest, 'zipped')
+    try:
+        packs.delete_pack(dest, '..')
+        raise AssertionError('deleting outside the packs folder must be refused')
+    except ValueError:
+        pass
+    assert [n for n, _ in packs.list_packs(dest)] == ['Test pet']
+
+
 def selftest():
-    global SETTINGS_FILE, CHARACTER_FILE
+    global SETTINGS_FILE, PACKS_DIR, CHARACTER_FILE
     assert newer('1.0.10', '1.0.9') and not newer('1.0.0', '1.0.0') and not newer('0.9', '1.0')
     check_updater()
     assert all_monitors() and all_monitors()[0] == monitor_at()
     with tempfile.TemporaryDirectory() as d:
         check_settings(d)
-        SETTINGS_FILE, CHARACTER_FILE = os.path.join(d, 'settings.json'), os.path.join(d, 'c.png')  # never touch real ones
-        app = App()
+        # never touch the real settings or packs
+        SETTINGS_FILE, PACKS_DIR = os.path.join(d, 'settings.json'), os.path.join(d, 'packs')
+        CHARACTER_FILE = os.path.join(d, 'c.png')
+        app = App(tray=False)
+        check_packs(d)
         p = app.pets[0]
         L, T, R, B = p.area
         for _ in range(200):
@@ -636,15 +637,28 @@ def selftest():
         p.x, p.state, p.dir = R - SIZE, 'walk', 1  # walk into right wall
         p.step()
         assert p.state == 'climb' or p.dir == -1
+        for style in BLOB_STYLES:
+            app.settings['style'] = style
+            p.draw()
         app.open_settings()
-        app.panel.change('size', 2.0)
-        app.panel.change('pets', 3)
+        panel = app.panel
+        for tab in ('home', 'characters', 'customize', 'settings'):
+            panel.show(tab)
+        panel.change('size', 2.0)
+        panel.change('pets', 3)
         assert p.px == 2 * SIZE and len(app.pets) == 3 and load_settings()['pets'] == 3
-        tk.PhotoImage(width=200, height=100).write(CHARACTER_FILE, format='png')
-        app.panel.change('character', True)
-        assert app.char_img and max(app.char_img.width(), app.char_img.height()) <= 2 * SIZE
-        app.panel.close()
-        app.root.destroy()
+        panel.change('character', 'Test pet')
+        assert app.pack and len(app.pack[0]['idle'][0]) == 2
+        for s in ('walk', 'climb', 'sit'):  # walk has its own image, climb/sit fall back to idle
+            p.state = s
+            p.draw()
+        panel.change('theme', 'Light')
+        panel.change('font', 'Bahnschrift')
+        app.set_visible(False)
+        assert all(q.win.state() == 'withdrawn' for q in app.pets)
+        app.set_visible(True)
+        panel.close()
+        app.quit()
     print('selftest ok')
 
 

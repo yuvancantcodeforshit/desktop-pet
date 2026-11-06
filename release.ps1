@@ -16,8 +16,8 @@ if (-not $old) { throw 'VERSION not found in pet.py' }
 if ([version]$Version -lt [version]$old) { throw "Version must not be lower than the current $old" }
 if ((git branch --show-current) -ne 'main') { throw 'Switch to main first: git switch main' }
 
-python -c "import sv_ttk" 2>$null
-if ($LASTEXITCODE) { throw 'Settings theme missing: python -m pip install --user sv-ttk' }
+python -c "import customtkinter, tkinterdnd2, pystray, PIL" 2>$null
+if ($LASTEXITCODE) { throw 'Add-ons missing: python -m pip install --user customtkinter tkinterdnd2 pystray pillow' }
 python pet.py --selftest
 if ($LASTEXITCODE) { throw 'selftest failed' }
 
@@ -38,7 +38,8 @@ function Sign($file) {
 }
 
 $w = "$env:TEMP\petbuild"
-python -m PyInstaller --onefile --noconsole --name DesktopPet --distpath dist --workpath $w --specpath $w --log-level ERROR --collect-data sv_ttk pet.py
+python -m PyInstaller --onefile --noconsole --name DesktopPet --distpath dist --workpath $w --specpath $w --log-level ERROR `
+    --collect-data customtkinter --collect-all tkinterdnd2 --hidden-import pystray._win32 --hidden-import panel pet.py
 if ($LASTEXITCODE) { throw 'building DesktopPet.exe failed' }
 Sign dist\DesktopPet.exe  # before hashing and before the installer bundles it
 # Test the packed exe too: a broken build would ship to every pet and could never update itself again.
