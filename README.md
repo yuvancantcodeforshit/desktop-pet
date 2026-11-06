@@ -2,11 +2,34 @@
 
 this thingy lets you drop a pet on ur desktop. u can move it around and stuff, throw it against the wall, downslam it, idk. do whatever
 
-Right-click it for **Settings / Add pet / Remove this pet / Quit**.
+Right-click it for **Settings / Add pet / Remove this pet / Quit**, or use the tray icon by the clock.
 
-**Settings:** color, speed, size, number of pets, your own character image (PNG/GIF),
-which monitors pets show up on, start with Windows, and check for updates now.
-Saved in `%APPDATA%\DesktopPet\`.
+**Settings window** (own dark title bar: minimize, eye = hide to tray, close):
+- **Home:** live preview, current character, speed / size / number of pets, show or hide all pets.
+- **Characters:** pick a character pack (drop a folder or `.zip` on the tab, or use the buttons);
+  the default blob has styles (Blob, Cat, Ghost, Bunny) and colors.
+- **Customize:** window theme, accent color, font.
+- **Settings:** start with Windows, which screens pets use, updates, about, reset.
+
+Everything is saved in `%APPDATA%\DesktopPet\` (packs in `characters\`).
+
+## Character packs
+
+A folder or `.zip` with one image per state. Only `idle` is required; missing states use `idle`.
+Images face right (the pet mirrors them walking left); animated GIF or still PNG, up to 2048 px.
+
+```
+my-cat/
+  pack.json   {"name": "My cat", "author": "you", "fps": 8}   (optional)
+  idle.gif    walk.gif    fall.png    drag.png    sit.png    climb.gif
+```
+
+## Run from source
+
+```powershell
+python -m pip install --user customtkinter tkinterdnd2 pystray pillow
+pythonw pet.py
+```
 
 ## Install
 
@@ -57,7 +80,9 @@ Then `.\release.ps1 <version>` signs, tests and publishes as usual.
 
 | File | What it is |
 |------|------------|
-| `pet.py` | The pet itself + auto-updater. `python pet.py` runs it, `--selftest` checks it. |
+| `pet.py` | The pet itself, tray icon, settings storage, auto-updater. `python pet.py` runs it, `--selftest` checks everything. |
+| `panel.py` | The Settings window (CustomTkinter): title bar, 4 tabs. |
+| `packs.py` | Character packs: import (folder/zip, with safety checks), list, delete, load animation frames. |
 | `installer.py` | Builds into `DesktopPetSetup.exe`; runs `install.cmd`. `/S` = silent. |
 | `install.cmd` | Copies the app to `%LOCALAPPDATA%\Programs\DesktopPet`, adds Start menu + Apps entry. No admin. |
 | `uninstall.cmd` | Removes all of the above. |
