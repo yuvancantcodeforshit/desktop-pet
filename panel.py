@@ -610,9 +610,9 @@ class SettingsWindow:
 
     def import_pack(self, path):
         try:
-            name = packs.import_pack(path, self.core.PACKS_DIR)
-            self.status = f'Added {name}.'
-            self.change('character', name)
+            names = packs.import_pack(path, self.core.PACKS_DIR)
+            self.status = f'Added {", ".join(names)}.' if len(names) < 4 else f'Added {len(names)} characters.'
+            self.change('character', names[0])
         except ValueError as err:
             self.status = f"Couldn't add {os.path.basename(os.path.normpath(path))}: {err}"
             self.refresh()

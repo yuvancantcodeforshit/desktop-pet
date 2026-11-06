@@ -272,7 +272,7 @@ class Pet:
         self.state, self.timer = state, random.randint(40, 200)
 
     def resize(self):
-        self.px = pet_px(self.app.settings)
+        self.px = int(pet_px(self.app.settings) * (self.app.pack_scale if self.app.pack else 1))
         self.cv.config(width=self.px, height=self.px)
 
     # --- mouse ---
@@ -559,13 +559,15 @@ class App:
     def load_character(self):
         """Load the chosen pack at the current size into self.pack; None means draw the blob."""
         name = self.settings['character']
-        key = (name, pet_px(self.settings))
+        path = os.path.join(PACKS_DIR, name)
+        self.pack_scale = packs.scale_of(packs.read_meta(path)) if name and os.path.isdir(path) else 1
+        key = (name, pet_px(self.settings), self.pack_scale)
         if key == getattr(self, 'pack_key', None):
             return  # unchanged: sliders call apply() many times per second, don't reload images each time
         self.pack_key, self.pack = key, None
-        if name and os.path.isdir(os.path.join(PACKS_DIR, name)):
+        if name and os.path.isdir(path):
             try:
-                self.pack = packs.load_frames(os.path.join(PACKS_DIR, name), pet_px(self.settings))
+                self.pack = packs.load_frames(path, int(pet_px(self.settings) * self.pack_scale))
             except Exception:
                 self.pack = None  # broken pack: fall back to the blob rather than crash the pets
             if self.pack and 'idle' not in self.pack[0]:
@@ -691,13 +693,13 @@ def check_packs(d):
     Image.new('RGBA', (30, 40), 'green').save(os.path.join(src, 'walk.png'))
     with open(os.path.join(src, 'pack.json'), 'w') as f:
         json.dump({'name': 'Test pet', 'author': 'me', 'fps': 12}, f)
-    assert packs.import_pack(src, dest) == 'Test pet'
+    assert packs.import_pack(src, dest) == ['Test pet']
     z = os.path.join(d, 'zipped.zip')
     with zipfile.ZipFile(z, 'w') as zf:
         zf.write(os.path.join(src, 'idle.gif'), 'inner/idle.gif')
         zf.writestr('../../evil.png', b'x')  # must never be written outside the pack
         zf.writestr('notes.txt', b'ignored')
-    assert packs.import_pack(z, dest) == 'zipped'
+    assert packs.import_pack(z, dest) == ['zipped']
     assert sorted(os.listdir(os.path.join(dest, 'zipped'))) == ['idle.gif'] and not os.path.exists(os.path.join(d, 'evil.png'))
     for bad in (os.path.join(d, 'nothing.zip'), d):  # no idle image
         if bad.endswith('.zip'):
@@ -710,7 +712,29 @@ def check_packs(d):
             pass
     loaded, fps = packs.load_frames(os.path.join(dest, 'Test pet'), 64)
     assert fps == 12 and len(loaded['idle'][0]) == 2 and max(loaded['idle'][0][0].width(), loaded['idle'][0][0].height()) == 64
-    assert [n for n, _ in packs.list_packs(dest)] == ['Test pet', 'zipped']
+    # a Shimeji-ee download: img/<name>/conf/actions.xml naming its pictures (facing left, 128 px)
+    shim = os.path.join(d, 'shimeji.zip')
+    pose = lambda img, t: f'<Pose Image="/{img}" ImageAnchor="64,128" Velocity="0,0" Duration="{t}" />'
+    actions = ('<Mascot xmlns="http://www.group-finity.com/Mascot"><ActionList>'
+               f'<Action Name="Stand" Type="Stay"><Animation>{pose("stand01.png", 250)}</Animation></Action>'
+               f'<Action Name="Walk" Type="Move"><Animation>{pose("walk01.png", 2)}{pose("walk02.png", 2)}</Animation></Action>'
+               '<Action Name="Pinched" Type="Embedded"><Animation Condition="#{x}">' + pose('pinch01.png', 5) +
+               '</Animation><Animation>' + pose('pinch02.png', 5) + '</Animation></Action>'
+               '</ActionList></Mascot>')
+    with zipfile.ZipFile(shim, 'w') as zf:
+        zf.writestr('app/img/Blue/conf/actions.xml', actions)
+        zf.writestr('app/conf/actions.xml', actions)  # app-wide defaults with no pictures: skipped
+        for i, img in enumerate(('stand01.png', 'walk01.png', 'walk02.png', 'pinch01.png', 'pinch02.png')):
+            buf = io.BytesIO()
+            Image.new('RGBA', (128, 128), (i * 40, 80, 200, 255)).save(buf, 'PNG')
+            zf.writestr('app/img/Blue/' + img, buf.getvalue())
+    assert packs.import_pack(shim, dest) == ['Blue']
+    meta = packs.read_meta(os.path.join(dest, 'Blue'))
+    assert meta['faces'] == 'left' and meta['frames']['drag'] == [['pinch02.png', 5]]  # the plain (unconditioned) pose
+    sframes, sfps = packs.load_frames(os.path.join(dest, 'Blue'), 64)
+    assert sfps == 25 and len(sframes['walk'][0]) == 4 and len(sframes['idle'][0]) == 250 and 'climb' not in sframes
+    assert [n for n, _ in packs.list_packs(dest)] == ['Blue', 'Test pet', 'zipped']
+    packs.delete_pack(dest, 'Blue')
     packs.delete_pack(dest, 'zipped')
     try:
         packs.delete_pack(dest, '..')
