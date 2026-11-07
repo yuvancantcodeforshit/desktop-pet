@@ -1,4 +1,4 @@
-﻿"""Desktop pet: walks on the taskbar, climbs screen edges, falls, can be dragged and thrown.
+"""Desktop pet: walks on the taskbar, climbs screen edges, falls, can be dragged and thrown.
 Run: pythonw pet.py   (right-click a pet for Settings / Add / Remove / Quit; tray icon too)
 """
 import ctypes, ctypes.wintypes, hashlib, io, json, math, os, random, re, shutil, subprocess, sys, tempfile, threading, time
@@ -16,7 +16,7 @@ except (AttributeError, OSError):
 DPI_SCALE = ctypes.windll.user32.GetDpiForSystem() / 96
 ctypes.windll.winmm.timeBeginPeriod(1)  # 1 ms timer: Windows' default 15.6 ms tick held Tk's timer to ~43 fps  # e.g. 1.25 on a 125% display; pets grow to match
 
-VERSION = '1.0.3'        # bump before each release; release.ps1 reads it
+VERSION = '1.0.4'        # bump before each release; release.ps1 reads it
 REPO = 'yuvancantcodeforshit/desktop-pet'
 UPDATE_URL = f'https://github.com/{REPO}/releases/latest/download/'
 MAX_EXE = 100_000_000    # refuse absurd downloads
