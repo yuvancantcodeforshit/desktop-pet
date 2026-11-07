@@ -730,7 +730,13 @@ class Pet:
             pair = next((frames[k] for k in (s,) + STAND_INS.get(s, ()) if k in frames), frames['idle'])
             seq = pair[1] if d < 0 else pair[0]
             i = int((f - self.since) * fps / 30)
-            return seq[min(i, len(seq) - 1) if s in ONCE else i % len(seq)]
+            img = seq[min(i, len(seq) - 1) if s in ONCE else i % len(seq)]
+            if s == 'sit' and self.app.settings['character'] == 'Yellow':  # shortcut: Yellow's laptop, by name
+                cache = self.app.__dict__.setdefault('laptops', {})
+                if cache.get(id(img), (None,))[0] is not img:  # keyed by the picture itself (ids get reused)
+                    cache[id(img)] = img, with_laptop(img)
+                img = cache[id(img)][1]
+            return img
         step = 0
         if s in ('walk', 'climb', 'ceiling', 'run', 'chase', 'dance', 'hang'):
             period = 0.2 if s in ('run', 'chase') else 0.3 if s == 'hang' else 0.34  # seconds per stride / flail
@@ -789,6 +795,47 @@ class Pet:
 def pet_px(settings):
     """On-screen pet size in pixels: base size x size setting x display scaling."""
     return int(SIZE * settings['size'] * DPI_SCALE)
+
+
+def with_laptop(img):
+    """The sitting picture with a little silver laptop on the floor in front of the knees, lid open towards
+    the face (Yellow's laptop). Which way it faces comes from the picture: the knees stick out on that side."""
+    from PIL import Image, ImageDraw
+    a = img.getchannel('A')
+    l, t, r, b = a.getbbox() or (0, 0, img.width, img.height)
+    h = b - t
+
+    def mid_x(y0, y1):  # middle of the solid pixels in these rows
+        xs = [x for y in range(int(y0), int(y1)) for x in range(l, r) if a.getpixel((x, y)) > 128]
+        return sum(xs) / len(xs) if xs else (l + r) / 2
+
+    face = -1 if mid_x(t + h * 0.45, t + h * 0.75) < mid_x(t, t + h * 0.3) else 1  # knees vs head
+    k, u = 4, h / 63  # drawn 4x then shrunk for smooth edges; u: 1/63 of the sitting figure's height
+    w = 38 * u  # laptop width
+    x0 = (l + 3 * u - w) if face < 0 else (r - 3 * u)  # just under his hands, past the knees
+    x0 = max(0, min(img.width - w, x0))  # kept inside the picture's square
+    big = Image.new('RGBA', (img.width * k, img.height * k), (0, 0, 0, 0))
+    d = ImageDraw.Draw(big)
+
+    def at(x, y):
+        return (x * k, y * k)
+
+    def poly(pts, fill, outline=None):
+        d.polygon([at(x, y) for x, y in pts], fill=fill, outline=outline, width=max(1, int(u * k * 0.8)))
+
+    # base on the floor, then the open lid leaning back away from him, seen from behind (silver back, white logo)
+    f = -face  # the lid leans away from his face
+    bx = lambda dx: x0 + (dx if face < 0 else w - dx)  # dx measured from the far end
+    poly([(bx(0), b), (bx(w), b), (bx(w - 2 * u), b - 3 * u), (bx(2 * u), b - 3 * u)], (150, 153, 160, 255))
+    top = b - 3 * u - 24 * u
+    lid = [(bx(1 * u), b - 3 * u), (bx(w - 6 * u), b - 3 * u), (bx(w - 6 * u) - f * 6 * u, top), (bx(1 * u) - f * 6 * u, top)]
+    poly(lid, (206, 209, 214, 255), (128, 131, 138, 255))
+    sx, sy = sum(p[0] for p in lid) / 4, sum(p[1] for p in lid) / 4
+    d.ellipse((*at(sx - 2.2 * u, sy - 2.2 * u), *at(sx + 2.2 * u, sy + 2.2 * u)), fill=(255, 255, 255, 255))
+    d.line([at(*lid[1]), at(*lid[2])], fill=(170, 215, 255, 255), width=max(1, int(u * k)))  # screen light, his side
+    out = big.resize(img.size, Image.LANCZOS)
+    out.alpha_composite(img)
+    return out
 
 
 class PilCanvas:
