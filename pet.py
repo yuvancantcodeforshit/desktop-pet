@@ -598,7 +598,8 @@ class Pet:
             bottom = self.y + px
             # shortcut: Yellow's fall pictures ride a staff, by name: sparkles fly off it, and he always lands softly
             staff = self.app.pack and not self.leap and self.app.settings['character'] == 'Yellow'
-            if not self.leap and self.vy >= 0:  # a plain drop falls at a steady 10 px a step; throws keep gravity
+            # a plain drop falls at a steady 10 px a step; throws keep gravity, and so does TDL (by name), always
+            if not self.leap and self.vy >= 0 and self.app.settings['character'] != 'TDL':
                 self.vy = min(self.vy + GRAVITY, 10)
             else:
                 self.vy += GRAVITY
