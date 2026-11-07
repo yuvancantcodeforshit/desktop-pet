@@ -21,7 +21,7 @@ COLORS = (('Mint', '#7ecf8f'), ('Sky', '#7cc4f2'), ('Lavender', '#b9a3f0'), ('Pe
 ACCENTS = ('#57c8ff', '#2f60d8', '#4fc1b3', '#7ecf8f', '#f2e27a', '#ff9e7a', '#ff6b6b', '#f29fc4', '#b9a3f0', '#e8e8e8')
 FONTS = ('Segoe UI Variable', 'Segoe UI', 'Bahnschrift', 'Cascadia Mono', 'Trebuchet MS', 'Comic Sans MS', 'Georgia')
 BEHAVIOUR = {'walk': 'Walk', 'run': 'Run', 'sit': 'Sit', 'lie': 'Lie down', 'dance': 'Dance',
-             'climb': 'Climb walls', 'chase': 'Chase the mouse', 'jump': 'Jump onto windows'}  # pet.ACTIONS
+             'climb': 'Climb walls', 'jump': 'Jump onto windows'}  # pet.ACTIONS ('chase' is kept there for old settings)
 RESTYLE = {'theme', 'accent', 'font'}         # redraw the whole window
 REFRESH = {'character', 'style', 'color'}     # rebuild the pages that show the character; sliders redraw nothing
 W, H, MIN_H = 460, 660, 360  # width is fixed; only the height can be dragged
@@ -580,7 +580,7 @@ class SettingsWindow(QWidget):
         col.addWidget(QLabel('What your pets may do on their own.', objectName='muted'))
         lay.addLayout(col, 1)
         off = self.app.settings['off']
-        b = self.button(f'{len(BEHAVIOUR) - len(off)} of {len(BEHAVIOUR)} on  ▾', lambda: None)
+        b = self.button(f'{sum(k not in off for k in BEHAVIOUR)} of {len(BEHAVIOUR)} on  ▾', lambda: None)
         menu = QMenu(b)
         for key, name in BEHAVIOUR.items():
             box = QCheckBox(name)  # check boxes in the menu: it stays open while you tick several
@@ -592,7 +592,7 @@ class SettingsWindow(QWidget):
                 now = [a for a in self.app.settings['off'] if a != k] + ([] if on else [k])
                 self.app.settings['off'] = now
                 self.app.apply()
-                b.setText(f'{len(BEHAVIOUR) - len(now)} of {len(BEHAVIOUR)} on  ▾')
+                b.setText(f'{sum(k not in now for k in BEHAVIOUR)} of {len(BEHAVIOUR)} on  ▾')
             box.toggled.connect(toggled)
             act = QWidgetAction(menu)
             act.setDefaultWidget(box)
