@@ -9,7 +9,7 @@ Images face right; the pet mirrors them when walking left.
 """
 import io, json, os, re, shutil, zipfile
 
-from PIL import Image, ImageOps, ImageSequence, ImageTk
+from PIL import Image, ImageOps, ImageSequence
 
 STATES = ('idle', 'walk', 'fall', 'drag', 'sit', 'climb', 'ceiling', 'run', 'lie', 'dance', 'land')
 EXTS = ('.gif', '.png')
@@ -241,9 +241,8 @@ def scale_of(meta):
     return min(4, max(0.5, k)) if isinstance(k, (int, float)) and not isinstance(k, bool) else 1
 
 
-def load_frames(folder, px, smooth=False, pil=False):
-    """({state: (frames facing right, frames facing left)}, fps). Frames are PhotoImages fitted in a px square.
-    smooth keeps soft edges (for the Settings window); pil gives smooth PIL pictures instead (the pets).
+def load_frames(folder, px):
+    """({state: (frames facing right, frames facing left)}, fps). Frames are PIL RGBA pictures fitted in a px square.
     Animations come from pack.json "frames" ({state: [[image, ticks], ...]}, Shimeji style) or one file per state."""
     meta = read_meta(folder)
     fps = meta.get('fps', 8)
@@ -261,14 +260,8 @@ def load_frames(folder, px, smooth=False, pil=False):
                     # smooth scaling; only big integer-ish blow-ups of tiny pixel art stay blocky on purpose
                     fr = fr.resize((max(1, round(fr.width * k)), max(1, round(fr.height * k))),
                                    Image.NEAREST if k >= 2 else Image.LANCZOS)
-                    if pil:
-                        right.append(fr)
-                        left.append(ImageOps.mirror(fr))
-                        continue
-                    if not smooth:  # hard edges for anything shown with a single see-through colour
-                        fr.putalpha(fr.getchannel('A').point(lambda v: 255 if v >= 128 else 0))
-                    right.append(ImageTk.PhotoImage(fr))
-                    left.append(ImageTk.PhotoImage(ImageOps.mirror(fr)))
+                    right.append(fr)
+                    left.append(ImageOps.mirror(fr))
             cache[name] = (right, left)
         return cache[name]
 
