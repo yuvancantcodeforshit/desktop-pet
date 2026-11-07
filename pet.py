@@ -390,7 +390,9 @@ class Pet:
         self.area = L, T, R, B = random.choice(app.allowed_areas())  # start on a monitor allowed in Settings
         self.x, self.y = random.randint(L, max(L, R - self.px)), T
         self.vx = self.vy = 0
-        self.spin = self.spin_v = self.sway = 0  # degrees: tumble after a throw by the leg, swing while held
+        self.spin = self.spin_v = 0  # degrees, degrees per step: tumble in the air after a throw
+        self.th = self.om = 0.0  # radians, radians/s: swing about the held hand or foot (0: hanging straight down)
+        self.sq = self.sqv = 0.0  # squash (+) / stretch (-) after a landing, springing back
         self.ledge = None  # the window this pet stands on, as (hwnd, left, top, right)
         self.dir = random.choice((-1, 1))
         self.frame = 0       # physics steps (30 a second): drives sprite animation and timers
@@ -408,8 +410,8 @@ class Pet:
     def land(self):
         """Touched down: play the pack's landing animation once (Shimeji StandFromFloor), or a quick squash."""
         frames = self.app.pack[0] if self.app.pack else None
-        if frames is None:
-            self.set('land', 6)
+        if frames is None:  # the blob: the squash spring (Pet.tick) is its landing
+            self.set('idle')
         elif 'land' in frames:
             fps = self.app.pack[1]
             self.set('land', max(1, round(len(frames['land'][0]) * 30 / fps)))
@@ -434,29 +436,41 @@ class Pet:
         mx, my = cursor_pos()
         l, t, r, b = self.body()
         leg = self.state != 'ceiling' and my - self.y > t + 0.72 * (b - t)
-        self.ox, self.oy, self.vx, self.vy = mx - self.x, my - self.y, 0, 0  # starts at the spot that was clicked
-        self.spin = self.sway = 0
+        self.vx = self.vy = self.spin = self.spin_v = self.sq = self.sqv = self.om = 0
+        self.th = 0.0
         self.set('hang' if leg else 'drag')
         l, t, r, b = self.body()
-        if leg:  # turned upside down, the feet (the bottom of the body) are on top
-            self.hx, self.hy = self.px - (l + r) / 2, self.px - b + 2
+        px = self.px
+        if not self.app.pack:  # the blob's held foot and raised hand are drawn at known spots (64 px grid)
+            self.hx, self.hy = px / 2, px * (5 if leg else 4) / 64
+        elif leg:  # turned upside down, the feet (the bottom of the body) are on top
+            self.hx, self.hy = px - (l + r) / 2, px - b + 2
         else:
             self.hx, self.hy = (l + r) / 2, t + 2
+        self.pv, self.pm = (0.0, 0.0), (mx, my)  # smoothed pointer velocity, last pointer position
         self.trail = [(time.perf_counter(), mx, my)]  # recent pointer positions, for the throw
+        self.follow()
 
     def follow(self, dt=0.0):
-        """Held: the grabbed spot eases onto the pointer; a pet held by the leg swings with the pointer."""
+        """Held: the hand or foot sits on the pointer and the body swings below it like a pendulum, pushed by
+        the pointer's acceleration (move fast and it lags and wobbles; stop and it swings back and settles)."""
         mx, my = cursor_pos()
         now = time.perf_counter()
-        last = self.trail[-1]
         self.trail = [p for p in self.trail if now - p[0] < 0.1] + [(now, mx, my)]
-        k = min(1.0, dt * 14)
-        self.ox += (self.hx - self.ox) * k
-        self.oy += (self.hy - self.oy) * k
-        if self.state == 'hang' and now > last[0]:
-            v = (mx - last[1]) / (now - last[0])  # pointer speed, px/s: the body lags behind it
-            self.sway += (max(-30, min(30, v * 0.03)) - self.sway) * min(1.0, dt * 8)
-        self.x, self.y = self.prev = mx - self.ox, my - self.oy
+        if dt > 0:
+            a = 1 - math.exp(-dt / 0.04)  # smooth the pointer: mouse moves arrive in uneven jumps
+            vx = self.pv[0] + ((mx - self.pm[0]) / dt - self.pv[0]) * a
+            vy = self.pv[1] + ((my - self.pm[1]) / dt - self.pv[1]) * a
+            g, length = GRAVITY / STEP ** 2, self.px * 0.6  # px/s^2; pivot to the body's swing centre
+            # a flick still swings it hard, a jump of the pointer can't fling it round in circles
+            ax, ay = (max(-4 * g, min(4 * g, (v - p) / dt)) for v, p in zip((vx, vy), self.pv))
+            self.pv, self.pm = (vx, vy), (mx, my)
+            n = max(1, int(dt / 0.004))  # small sub-steps keep the swing stable
+            for _ in range(n):
+                al = (-(g - ay) * math.sin(self.th) - ax * math.cos(self.th)) / length - 2.5 * self.om
+                self.om += al * dt / n
+                self.th = max(-2.6, min(2.6, self.th + self.om * dt / n))
+        self.x, self.y = self.prev = mx - self.hx, my - self.hy
 
     def drag(self):
         self.follow()
@@ -471,9 +485,9 @@ class Pet:
             x1, y1 = x0, y0
         self.vx = max(-25, min(25, (x1 - x0) / dt * STEP))  # px per movement step
         self.vy = max(-25, min(25, (y1 - y0) / dt * STEP))
-        if self.state == 'hang':  # let go by the leg: tumble a little, then turn upright while falling
-            self.spin = 180 + self.sway
-            self.spin_v = -(1 if self.vx >= 0 else -1) * max(6, min(24, abs(self.vx) * 1.5))  # degrees per step
+        # let go: keeps its swing as spin, and a throw rolls it the way it was thrown (right: clockwise)
+        self.spin = math.degrees(self.th) + (180 if self.state == 'hang' else 0)
+        self.spin_v = max(-15, min(15, math.degrees(self.om) * STEP - self.vx * (0.6 if self.state == 'hang' else 0.3)))
         self.update_area()  # dropped on another monitor: live there
         self.set('fall')
 
@@ -519,24 +533,34 @@ class Pet:
             self.vy += GRAVITY
             self.x += self.vx
             self.y += self.vy
-            if not L <= self.x <= R - px:
+            if not L <= self.x <= R - px:  # hit a screen edge: bounce off it, the knock flips the spin
                 self.x = max(L, min(R - px, self.x))
+                self.spin_v = max(-15, min(15, -self.spin_v * 0.6 + self.vx * 0.5))
                 self.vx = -self.vx * 0.5
             cx = self.x + px / 2
             if (w and not self.ledge and self.vy > 0 and w[1] <= cx <= w[3] and bottom <= w[2] <= self.y + px
                     and w[2] - px > T):  # dropping past a window's top edge: land on it
                 self.ledge, floor = w, w[2] - px
-            if self.spin:  # thrown by the leg: spin, slow down, then settle upright
-                self.spin += self.spin_v
-                self.spin_v *= 0.88
-                if abs(self.spin_v) < 3:
-                    upright = round(self.spin / 360) * 360
-                    self.spin += (upright - self.spin) * 0.3
-                    if abs(upright - self.spin) < 3:
-                        self.spin = 0
+            if self.spin or self.spin_v:  # tumbling: air drag slows the spin, then it rights itself before landing
+                self.spin = (self.spin + self.spin_v + 180) % 360 - 180
+                self.spin_v *= 0.98
+                err = -self.spin  # degrees to upright
+                near = floor - self.y < px * 2
+                # turning towards upright, or nearly still: pull upright. Turning away: let it roll on over the top,
+                # so it never swings back against the way it was thrown
+                if (near or abs(self.spin_v) < 6) and (err * self.spin_v >= 0 or abs(self.spin_v) < 2):
+                    self.spin_v = (self.spin_v + err * (0.06 if near else 0.03)) * 0.85
+                if abs(self.spin) < 2 and abs(self.spin_v) < 1:
+                    self.spin = self.spin_v = 0
             if self.y >= floor:
-                self.y, self.vx, self.vy, self.spin = floor, 0, 0, 0
-                self.land()
+                self.y = floor
+                self.sq, self.sqv = min(0.35, self.vy / 40), 0.0  # squash on impact, springs back
+                if self.vy > 9:  # hard landing: bounce
+                    self.vy, self.vx, self.spin_v = -self.vy * 0.3, self.vx * 0.7, self.spin_v * 0.5
+                else:
+                    flop = abs(self.spin) > 50 and 'lie' not in self.app.settings['off']  # came down sideways
+                    self.vx, self.vy, self.spin, self.spin_v = 0, 0, 0, 0
+                    self.set('lie', 25) if flop else self.land()  # flopped over: lies there a moment, gets up
         elif s == 'land':
             if self.timer <= 0:
                 self.set('idle')
@@ -572,7 +596,7 @@ class Pet:
                 self.set('fall')
         elif s == 'ceiling':  # monkey bars across the top of the screen
             self.y = T
-            self.x += 1.5 * speed * self.dir
+            self.x += 2.5 * speed * self.dir
             if not L <= self.x <= R - px:  # reached the far side: drop down
                 self.x = max(L, min(R - px, self.x))
                 self.set('fall')
@@ -623,9 +647,14 @@ class Pet:
             self.acc = 0.0
             self.follow(dt)
             x, y = self.x, self.y
-            if self.state == 'drag' and self.t % 1 > 0.6:  # held still for a moment: wriggle to get free
-                x += 2 if self.t % 0.12 < 0.06 else -2
         else:
+            if self.sq or self.sqv:  # squash spring: about 3 bounces a second, dies out in half a second
+                n = int(dt / 0.005) + 1  # small sub-steps keep the stiff spring stable
+                for _ in range(n):
+                    self.sqv += (-400 * self.sq - 14 * self.sqv) * dt / n
+                    self.sq += self.sqv * dt / n
+                if abs(self.sq) < 0.01 and abs(self.sqv) < 0.2:
+                    self.sq = self.sqv = 0.0
             self.acc += dt
             while self.acc >= STEP:
                 self.prev = (self.x, self.y)
@@ -665,29 +694,39 @@ class Pet:
         img = self.picture()
         top = self.state == 'ceiling'  # hanging: picture hugs the top edge, not the floor
         hang = self.state == 'hang'
-        # turn: swing while held by the leg (about the feet), tumble after that throw (about the middle)
-        turn = round(self.sway / 3) * 3 if hang else round(self.spin / 6) * 6 % 360 if self.state == 'fall' else 0
-        key = (id(img), top, hang, turn)
+        held = self.state in ('drag', 'hang')
+        # turn: swing about the held hand or foot, or tumble in the air about the middle
+        turn = (round(math.degrees(self.th) / 2) * 2 if held else
+                round(self.spin / 4) * 4 % 360 if self.state == 'fall' else 0)
+        sq = round(self.sq * 25) / 25  # squash (+) / stretch (-), in steps of 0.04
+        key = (id(img), top, hang, turn, sq, (round(self.hx), round(self.hy)) if held else None)
         shown = self.shown.get(key)
         if shown is None:
             from PIL import Image
-            canvas = Image.new('RGBA', (self.px, self.px), (0, 0, 0, 0))
-            canvas.alpha_composite(img, ((self.px - img.width) // 2, 0 if top else self.px - img.height))
+            px = self.px
+            canvas = Image.new('RGBA', (px, px), (0, 0, 0, 0))
+            canvas.alpha_composite(img, ((px - img.width) // 2, 0 if top else px - img.height))
             if hang:
                 canvas = canvas.transpose(Image.Transpose.ROTATE_180)
-            pad = 0
-            if turn:  # a bigger square so the turned picture isn't cut off at the corners
-                pad = self.px // 3
-                big = Image.new('RGBA', (self.px + 2 * pad,) * 2, (0, 0, 0, 0))
-                big.paste(canvas, (pad, pad))
-                canvas = big.rotate(turn, Image.BICUBIC, center=(self.hx + pad, self.hy + pad) if hang else None)
-            shown = canvas.convert('RGBa').tobytes('raw', 'BGRa'), canvas.width, pad  # premultiplied, as Windows wants
+            dx = dy = 0  # where the picture's corner sits, from the pet's position
+            if turn:  # room to turn all the way round the pivot, then trimmed to what's drawn
+                big = Image.new('RGBA', (3 * px, 3 * px), (0, 0, 0, 0))
+                big.paste(canvas, (px, px))
+                big = big.rotate(turn, Image.BICUBIC, center=(self.hx + px, self.hy + px) if held else None)
+                l, t, r, b = big.getbbox() or (px, px, px + 1, px + 1)
+                canvas, dx, dy = big.crop((l, t, r, b)), l - px, t - px
+            if sq:  # squashed flat and wide (or stretched tall), feet staying on the ground
+                w, h = canvas.size
+                nw, nh = max(1, round(w * (1 + sq * 0.6))), max(1, round(h * (1 - sq)))
+                canvas, dx, dy = canvas.resize((nw, nh), Image.BICUBIC), dx + (w - nw) // 2, dy + h - nh
+            # premultiplied, as Windows wants
+            shown = canvas.convert('RGBa').tobytes('raw', 'BGRa'), canvas.width, canvas.height, dx, dy
             if len(self.shown) > 600:
                 self.shown.clear()
             self.shown[key] = shown
-        data, size, pad = shown
-        show_layered(self.win.hwnd, data, size, size, (self.x if x is None else x) - pad,
-                     (self.y if y is None else y) - pad)
+        data, w, h, dx, dy = shown
+        show_layered(self.win.hwnd, data, w, h, round(self.x if x is None else x) + dx,
+                     round(self.y if y is None else y) + dy)
 
 
 def pet_px(settings):
@@ -747,6 +786,9 @@ def draw_blob(c, color, s='idle', d=1, f=0, step=0, style='Blob'):
     if s == 'ceiling':  # hanging from the top edge: arms up, one hand forward per step
         c.create_line(24, top + 8, 22 + step, 0, fill=LINE, width=3)
         c.create_line(40, top + 8, 42 - step, 0, fill=LINE, width=3)
+    if s == 'drag':  # picked up: one arm reaches up, its hand (top middle) holds the pointer
+        c.create_line(42, top + 22, 32, 6, fill=LINE, width=3)
+        c.create_oval(28, 0, 36, 8, fill=LINE, outline='')
     if s == 'hang':  # held up by one ankle. Drawn feet-down here; Pet.draw turns it over, so these arms dangle and flail
         for x, hx in ((16, 13 + 2 * step), (48, 51 - 2 * step)):
             c.create_line(x, top + 24, hx, 8, fill=LINE, width=3)
@@ -1179,17 +1221,29 @@ def selftest():
         cursor_pos = lambda: (100 + (l + r) // 2, 100 + b - 2)  # grab by the feet: hangs upside down
         p.grab()
         assert p.state == 'hang' and p.hy < p.px / 3
-        for _ in range(30):
+        mx0, my0 = cursor_pos()
+        assert abs(p.x + p.hx - mx0) < 0.01 and abs(p.y + p.hy - my0) < 0.01  # the foot is on the pointer at once
+        for i in range(40):  # pointer sweeps right, then stops
+            cursor_pos = lambda i=i: (mx0 + 8 * min(i, 20), my0)
             p.follow(1 / 60)
-        p.draw()
-        assert abs(p.ox - p.hx) < 1 and abs(p.oy - p.hy) < 1  # the feet reached the pointer
+            p.draw()
+            if i == 12:
+                assert p.th < -0.05, p.th  # the body lags behind, swung to the left
+        for _ in range(400):
+            p.follow(1 / 60)
+        assert abs(p.th) < 0.02 and abs(p.om) < 0.05, (p.th, p.om)  # swung back and settled
         p.trail = [(time.perf_counter() - 0.05, 0, 100), (time.perf_counter(), 60, 100)]
         p.drop()
-        assert p.state == 'fall' and p.spin
-        for _ in range(60):
+        assert p.state == 'fall' and p.spin_v < 0  # thrown right: rolls clockwise
+        p.vy = 20  # coming down hard
+        p.y = p.area[3] - p.px - 10
+        p.step()
+        assert p.state == 'fall' and p.vy < 0 and p.sq > 0, 'hard landing: squash and bounce'
+        for _ in range(200):
             p.draw()
             p.step()
-        assert p.spin == 0 or p.state != 'fall'  # tumbled, then upright again
+            p.tick()
+        assert p.spin == 0 and p.state != 'fall'  # tumbled, righted itself, landed
         p.x, p.y, p.state = 100, 100, 'idle'
         cursor_pos = lambda: (100 + (l + r) // 2, 100 + t + 2)  # grab by the head: holds on with its hand
         p.grab()
