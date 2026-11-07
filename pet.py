@@ -1,11 +1,13 @@
 ﻿"""Desktop pet: walks on the taskbar, climbs screen edges, falls, can be dragged and thrown.
 Run: pythonw pet.py   (right-click a pet for Settings / Add / Remove / Quit; tray icon too)
 """
-import ctypes, ctypes.wintypes, hashlib, io, json, math, os, queue, random, re, shutil, subprocess, sys, tempfile, threading, time
-import tkinter as tk
+import ctypes, ctypes.wintypes, hashlib, io, json, math, os, random, re, shutil, subprocess, sys, tempfile, threading, time
 import urllib.request, winreg
 
 import packs
+from PySide6.QtCore import Qt, QTimer
+from PySide6.QtGui import QAction, QCursor, QIcon, QImage, QPixmap
+from PySide6.QtWidgets import QApplication, QMenu, QSystemTrayIcon, QWidget
 
 try:  # sharp text and images: draw at the real screen resolution instead of letting Windows stretch a blurry copy
     ctypes.windll.shcore.SetProcessDpiAwareness(2)  # per-monitor aware; must happen before any window exists
@@ -345,13 +347,42 @@ def active_window():
     return (h, r.left, r.top, r.right) if r.right - r.left >= 150 else None
 
 
+class PetWidget(QWidget):
+    """The pet's window. Qt never paints it: Pet.draw() hands Windows a finished 32-bit picture
+    (per-pixel transparency, moved and redrawn in one call). Qt only delivers the mouse."""
+
+    def __init__(self, pet):
+        super().__init__(None, Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool)
+        self.pet = pet
+        self.setAttribute(Qt.WA_ShowWithoutActivating)
+        self.setCursor(Qt.PointingHandCursor)
+        self.hwnd = int(self.winId())
+        ex = user32.GetWindowLongW(self.hwnd, -20)
+        user32.SetWindowLongW(self.hwnd, -20, ex | 0x80000 | 0x80)  # WS_EX_LAYERED (invisible until drawn), TOOLWINDOW
+
+    def paintEvent(self, e):
+        pass  # the layered window shows Pet.draw()'s picture
+
+    def mousePressEvent(self, e):
+        if e.button() == Qt.LeftButton:
+            self.pet.grab()
+        elif e.button() == Qt.RightButton:
+            self.pet.menu()
+
+    def mouseMoveEvent(self, e):
+        if e.buttons() & Qt.LeftButton and self.pet.state == 'drag':
+            self.pet.drag()
+
+    def mouseReleaseEvent(self, e):
+        if e.button() == Qt.LeftButton and self.pet.state == 'drag':
+            self.pet.drop()
+
+
 class Pet:
     def __init__(self, app):
         self.app, self.alive = app, True
-        w = self.win = tk.Toplevel(app.root, cursor='hand2')
-        w.overrideredirect(True)
-        w.attributes('-topmost', True)
-        self.hwnd, self.shown = None, {}  # layered window handle; picture -> its prepared bytes
+        self.win = PetWidget(self)
+        self.shown = {}  # picture -> its prepared bytes
         self.resize()
         self.area = L, T, R, B = random.choice(app.allowed_areas())  # start on a monitor allowed in Settings
         self.x, self.y = random.randint(L, max(L, R - self.px)), T
@@ -363,13 +394,8 @@ class Pet:
         self.prev = (self.x, self.y)
         self.acc, self.last = 0.0, time.perf_counter()
         self.set('fall')
-        w.bind('<ButtonPress-1>', self.grab)
-        w.bind('<B1-Motion>', self.drag)
-        w.bind('<ButtonRelease-1>', self.drop)
-        w.bind('<Button-3>', self.menu)
-        if not app.visible:
-            w.withdraw()
-        self.tick()
+        if app.visible:
+            self.win.show()
 
     def set(self, state, timer=None):
         self.state, self.timer = state, timer or random.randint(40, 200)
@@ -388,23 +414,23 @@ class Pet:
 
     def resize(self):
         self.px = int(pet_px(self.app.settings) * (self.app.pack_scale if self.app.pack else 1))
-        self.win.geometry(f'{self.px}x{self.px}')
         self.shown.clear()
 
-    # --- mouse ---
-    def grab(self, e):
+    # --- mouse (screen pixels from Windows, the same units as the pet's position) ---
+    def grab(self):
+        mx, my = cursor_pos()
         self.set('drag')
-        self.ox, self.oy, self.vx, self.vy = e.x, e.y, 0, 0
-        self.trail = [(time.perf_counter(), e.x_root, e.y_root)]  # recent pointer positions, for the throw
+        self.ox, self.oy, self.vx, self.vy = mx - self.x, my - self.y, 0, 0  # keep the spot that was grabbed
+        self.trail = [(time.perf_counter(), mx, my)]  # recent pointer positions, for the throw
 
-    def drag(self, e):
-        nx, ny = e.x_root - self.ox, e.y_root - self.oy
+    def drag(self):
+        mx, my = cursor_pos()
         now = time.perf_counter()
-        self.trail = [p for p in self.trail if now - p[0] < 0.1] + [(now, e.x_root, e.y_root)]
-        self.x, self.y = self.prev = nx, ny
-        self.draw(nx, ny)  # follow the pointer at once, not on the next frame
+        self.trail = [p for p in self.trail if now - p[0] < 0.1] + [(now, mx, my)]
+        self.x, self.y = self.prev = mx - self.ox, my - self.oy
+        self.draw()  # follow the pointer at once, not on the next frame
 
-    def drop(self, _):
+    def drop(self):
         # throw with the pointer's real speed over its last 0.1 s (one jittery event no longer decides it)
         t0, x0, y0 = self.trail[0]
         t1, x1, y1 = self.trail[-1]
@@ -426,14 +452,14 @@ class Pet:
         self.x, self.y = random.randint(L, max(L, R - self.px)), T
         self.set('fall')
 
-    def menu(self, e):
-        m = tk.Menu(self.win, tearoff=0)
-        m.add_command(label='Settings...', command=self.app.open_settings)
-        m.add_command(label='Add pet', command=self.app.add)
-        m.add_command(label='Remove this pet', command=lambda: self.app.remove(self))
-        m.add_separator()
-        m.add_command(label='Quit', command=self.app.quit)
-        m.tk_popup(e.x_root, e.y_root)
+    def menu(self):
+        m = QMenu()
+        m.addAction('Settings...', self.app.open_settings)
+        m.addAction('Add pet', self.app.add)
+        m.addAction('Remove this pet', lambda: self.app.remove(self))
+        m.addSeparator()
+        m.addAction('Quit', self.app.quit)
+        m.exec(QCursor.pos())
 
     # --- behaviour ---
     def step(self):
@@ -564,7 +590,6 @@ class Pet:
             x = self.prev[0] + (self.x - self.prev[0]) * a
             y = self.prev[1] + (self.y - self.prev[1]) * a
         self.draw(x, y)
-        self.win.after(15, self.tick)
 
     def picture(self):
         """This tick's PIL picture of the pet."""
@@ -587,11 +612,8 @@ class Pet:
         return self.app.blob_frame(s, 1 if d > 0 else -1, step, blink, st['style'], st['color'], self.px)
 
     def draw(self, x=None, y=None):
-        if self.hwnd is None:
-            self.win.update_idletasks()
-            self.hwnd = user32.GetParent(self.win.winfo_id())  # the real window around Tk's frame
-            ex = user32.GetWindowLongW(self.hwnd, -20)
-            user32.SetWindowLongW(self.hwnd, -20, ex | 0x80000 | 0x80)  # WS_EX_LAYERED, WS_EX_TOOLWINDOW
+        if not self.win.isVisible():
+            return
         img = self.picture()
         top = self.state == 'ceiling'  # hanging: picture hugs the top edge, not the floor
         key = (id(img), top)
@@ -604,7 +626,7 @@ class Pet:
             if len(self.shown) > 600:
                 self.shown.clear()
             self.shown[key] = data
-        show_layered(self.hwnd, data, self.px, self.px, self.x if x is None else x, self.y if y is None else y)
+        show_layered(self.win.hwnd, data, self.px, self.px, self.x if x is None else x, self.y if y is None else y)
 
 
 def pet_px(settings):
@@ -612,17 +634,9 @@ def pet_px(settings):
     return int(SIZE * settings['size'] * DPI_SCALE)
 
 
-def draw_pack(c, pack, s, d, f, px, x=None):
-    """One frame of a loaded pack ((frames, fps) from packs.load_frames) on canvas c, feet at the bottom."""
-    frames, fps = pack
-    right, left = frames.get(s) or frames['idle']
-    seq = left if d < 0 else right
-    c.create_image(px // 2 if x is None else x, px, anchor='s', image=seq[int(f * fps / 30) % len(seq)])
-
-
 class PilCanvas:
-    """The bit of the tk.Canvas drawing API that draw_blob uses, painted onto a PIL image 4x larger and shrunk,
-    so edges come out smooth (tk's canvas has no anti-aliasing)."""
+    """The bit of a canvas drawing API that draw_blob uses, painted onto a PIL image 4x larger and shrunk,
+    so edges come out smooth."""
 
     def __init__(self, size):
         from PIL import Image, ImageDraw
@@ -715,20 +729,20 @@ def draw_blob(c, color, s='idle', d=1, f=0, step=0, style='Blob'):
             c.create_line(ex + 15, ey + dy, ex + 22, ey + dy, fill=LINE)
 
 
+def to_pixmap(img):
+    """PIL RGBA picture -> QPixmap."""
+    data = img.convert('RGBA').tobytes('raw', 'RGBA')
+    return QPixmap.fromImage(QImage(data, img.width, img.height, img.width * 4, QImage.Format_RGBA8888).copy())
+
+
 class App:
     def __init__(self, tray=True, startup=False, window=True):
         """startup: launched at Windows login, so bring back the saved pets quietly.
         Otherwise (Start menu / taskbar) open Settings and wait for the user to send a pet out from Home."""
-        self.root = tk.Tk()
-        self.root.withdraw()
+        self.qt = QApplication.instance() or QApplication(sys.argv)
+        self.qt.setQuitOnLastWindowClosed(False)  # the tray and the pets keep it alive
         if os.path.exists(LOGO):
-            self.root.iconbitmap(default=LOGO)  # every window's taskbar / title icon
-        try:  # drag-and-drop for the Characters tab; the app works without it
-            from tkinterdnd2 import TkinterDnD
-            TkinterDnD._require(self.root)
-            self.dnd = True
-        except Exception:
-            self.dnd = False
+            self.qt.setWindowIcon(QIcon(LOGO))
         self.settings = load_settings()
         self.blob_cache = {}
         self.migrate_character()
@@ -738,8 +752,7 @@ class App:
         self.visible = True
         self.minutes = 0
         self.win = None  # active window pets can stand on; refreshed by watch_window()
-        self.events = queue.Queue()  # tray icon runs in its own thread; it posts here, tk reads in poll()
-        self.tray = start_tray(self) if tray else None
+        self.tray = self.start_tray() if tray else None
         self.show_event = k32.CreateEventW(None, False, False, SHOW_EVENT)
         if tray and autostart():
             autostart(True)  # refresh an older login entry so it carries --startup
@@ -750,28 +763,33 @@ class App:
             self.settings['pets'] = 0  # in memory only until a pet is sent out; the saved count is for login
         if FROZEN:
             threading.Thread(target=download_update, daemon=True).start()
-        self.root.after(60_000, self.every_minute)
+        self.timers = [self.every(15, self.frame, precise=True), self.every(60_000, self.every_minute),
+                       self.every(100, self.watch_window), self.every(200, self.poll)]
         if window and not startup:
-            self.root.after(50, self.open_settings)
-        self.poll()
+            QTimer.singleShot(50, self.open_settings)
         self.watch_window()
+
+    def every(self, ms, fn, precise=False):
+        t = QTimer()
+        if precise:
+            t.setTimerType(Qt.PreciseTimer)
+        t.timeout.connect(fn)
+        t.start(ms)
+        return t
+
+    def run(self):
+        self.qt.exec()
+
+    def frame(self):
+        for p in list(self.pets):
+            p.tick()
 
     def watch_window(self):
         self.win = active_window()
-        if self.root.winfo_exists():
-            self.root.after(100, self.watch_window)
 
     def poll(self):
-        try:
-            while True:
-                {'open': self.open_settings, 'toggle': lambda: self.set_visible(not self.visible),
-                 'quit': self.quit}[self.events.get_nowait()]()
-        except queue.Empty:
-            pass
         if self.show_event and k32.WaitForSingleObject(ctypes.c_void_p(self.show_event), 0) == 0:
             self.open_settings()  # the app was launched again
-        if self.root.winfo_exists():
-            self.root.after(200, self.poll)
 
     def every_minute(self):
         for p in self.pets:  # resolution, taskbar or monitor layout may have changed
@@ -784,7 +802,6 @@ class App:
                 return
             if self.minutes % 360 == 0:  # pets left running for days still get updates (every 6 h)
                 threading.Thread(target=download_update, daemon=True).start()
-        self.root.after(60_000, self.every_minute)
 
     def allowed(self, name):
         """Monitor allowed by Settings? No choice saved, or none of the chosen ones connected: all allowed."""
@@ -817,7 +834,7 @@ class App:
         self.pack_key, self.pack = key, None
         if name and os.path.isdir(path):
             try:
-                self.pack = packs.load_frames(path, int(pet_px(self.settings) * self.pack_scale), pil=True)
+                self.pack = packs.load_frames(path, int(pet_px(self.settings) * self.pack_scale))
             except Exception:
                 self.pack = None  # broken pack: fall back to the blob rather than crash the pets
             if self.pack and 'idle' not in self.pack[0]:
@@ -835,6 +852,8 @@ class App:
             self.add(save=False)
         while len(self.pets) > target:
             self.remove(self.pets[-1])
+        if self.tray:
+            self.tray.setIcon(QIcon(to_pixmap(logo_image(64, self.settings['color']))))
 
     def blob_frame(self, s, d, step, blink, style, color, px):
         """Smooth picture of the default pet for one pose, drawn once and reused."""
@@ -851,22 +870,40 @@ class App:
     def set_visible(self, on):
         self.visible = on
         for p in self.pets:
-            p.win.deiconify() if on else p.win.withdraw()
+            p.win.setVisible(on)
         if self.tray:
-            self.tray.update_menu()
+            self.show_action.setChecked(on)
 
     def open_settings(self, tab='home'):
-        if self.panel and self.panel.win.winfo_exists():
-            self.panel.show(tab)
+        if self.panel:
+            self.panel.show_tab(tab)
         else:
-            from panel import SettingsWindow  # imported here: customtkinter is only needed once the window opens
+            from panel import SettingsWindow
             self.panel = SettingsWindow(self, sys.modules[__name__], tab)
+
+    def start_tray(self):
+        """Tray icon next to the clock: click = Settings; menu = Settings, Show pets, Quit."""
+        tray = QSystemTrayIcon(QIcon(to_pixmap(logo_image(64, self.settings['color']))))
+        tray.setToolTip('Desktop Pet')
+        menu = self.tray_menu = QMenu()
+        menu.addAction('Settings', self.open_settings)
+        self.show_action = QAction('Show pets', menu, checkable=True, checked=True)
+        self.show_action.toggled.connect(lambda on: on != self.visible and self.set_visible(on))
+        menu.addAction(self.show_action)
+        menu.addSeparator()
+        menu.addAction('Quit', self.quit)
+        tray.setContextMenu(menu)
+        tray.activated.connect(lambda why: why == QSystemTrayIcon.Trigger and self.open_settings())
+        tray.show()
+        return tray
 
     def quit(self):
         if self.tray:
-            self.tray.stop()
-        if self.root.winfo_exists():
-            self.root.destroy()
+            self.tray.hide()
+        for p in self.pets:
+            p.alive = False
+            p.win.close()
+        self.qt.quit()
 
     def add(self, save=True):
         if len(self.pets) >= 10:
@@ -878,7 +915,8 @@ class App:
 
     def remove(self, pet):
         pet.alive = False
-        pet.win.destroy()
+        pet.win.close()
+        pet.win.deleteLater()
         self.pets.remove(pet)
         self.settings['pets'] = len(self.pets)
         save_settings(self.settings)
@@ -886,24 +924,8 @@ class App:
 
     def quit_if_idle(self):
         """No pets, no Settings window, no tray icon to come back from: nothing left to show, so exit."""
-        if not self.pets and not self.tray and not (self.panel and self.panel.win.winfo_exists()):
+        if not self.pets and not self.tray and not self.panel:
             self.quit()
-
-
-def start_tray(app):
-    """Tray icon next to the clock: click = Settings; menu = Settings, Show pets, Quit. None if pystray is missing."""
-    try:
-        import pystray
-    except ImportError:
-        return None
-    post = lambda ev: (lambda icon, item: app.events.put(ev))
-    icon = pystray.Icon('DesktopPet', logo_image(64, app.settings['color']), 'Desktop Pet', pystray.Menu(
-        pystray.MenuItem('Settings', post('open'), default=True),
-        pystray.MenuItem('Show pets', post('toggle'), checked=lambda item: app.visible),
-        pystray.Menu.SEPARATOR,
-        pystray.MenuItem('Quit', post('quit'))))
-    icon.run_detached()
-    return icon
 
 
 def check_updater():
@@ -973,7 +995,7 @@ def check_packs(d):
         except ValueError:
             pass
     loaded, fps = packs.load_frames(os.path.join(dest, 'Test pet'), 64)
-    assert fps == 12 and len(loaded['idle'][0]) == 2 and max(loaded['idle'][0][0].width(), loaded['idle'][0][0].height()) == 64
+    assert fps == 12 and len(loaded['idle'][0]) == 2 and max(loaded['idle'][0][0].size) == 64
     # a Shimeji-ee download: img/<name>/conf/actions.xml naming its pictures (facing left, 128 px)
     shim = os.path.join(d, 'shimeji.zip')
     pose = lambda img, t: f'<Pose Image="/{img}" ImageAnchor="64,128" Velocity="0,0" Duration="{t}" />'
@@ -1082,15 +1104,16 @@ def selftest():
         app.open_settings()
         panel = app.panel
         for tab in ('home', 'characters', 'customize', 'settings'):
-            panel.show(tab)
+            panel.show_tab(tab)
         panel.change('size', 2.0)
         panel.change('pets', 3)
         assert p.px == int(2 * SIZE * DPI_SCALE) and len(app.pets) == 3 and load_settings()['pets'] == 3
-        panel.show('home')
+        panel.pick_subtab('customize', 'Font')
+        panel.show_tab('home')
         panel.spawn()  # clicking the character on Home
         assert len(app.pets) == 4 and load_settings()['pets'] == 4
         panel.change('pets', 0)  # no pets left must not quit while the window is open
-        assert not app.pets and app.root.winfo_exists()
+        assert not app.pets and app.qt is not None
         panel.change('pets', 1)
         p = app.pets[0]
         panel.change('character', 'Test pet')
@@ -1101,7 +1124,7 @@ def selftest():
         panel.change('theme', 'Light')
         panel.change('font', 'Bahnschrift')
         app.set_visible(False)
-        assert all(q.win.state() == 'withdrawn' for q in app.pets)
+        assert not any(q.win.isVisible() for q in app.pets)
         app.set_visible(True)
         panel.close()
         app.quit()
@@ -1125,4 +1148,4 @@ if __name__ == '__main__':
                 pass
             if apply_update():  # update downloaded last run but never applied
                 sys.exit()
-        App(startup='--startup' in sys.argv).root.mainloop()
+        App(startup='--startup' in sys.argv).run()

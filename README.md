@@ -27,7 +27,7 @@ my-cat/
 ## Run from source
 
 ```powershell
-python -m pip install --user customtkinter tkinterdnd2 pystray pillow
+python -m pip install --user pyside6-essentials pillow
 pythonw pet.py
 ```
 
