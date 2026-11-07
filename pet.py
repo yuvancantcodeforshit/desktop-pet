@@ -43,7 +43,9 @@ THEMES = {
     'Light':    ('#f3f3f3', '#ffffff', '#2f60d8', '#1a1a1a', '#666666'),
 }
 DEFAULTS = {'color': '#7ecf8f', 'speed': 1.0, 'size': 1.0, 'pets': 1, 'monitors': [], 'character': '',
-            'style': 'Blob', 'theme': 'Midnight', 'accent': '', 'font': 'Segoe UI Variable'}
+            'style': 'Blob', 'theme': 'Midnight', 'accent': '', 'font': 'Segoe UI Variable', 'off': []}
+# things a pet may do on its own; Settings > Home > Behaviour turns them off (saved in 'off')
+ACTIONS = ('walk', 'run', 'sit', 'lie', 'dance', 'climb', 'chase', 'jump')
 RUN_KEY = r'Software\Microsoft\Windows\CurrentVersion\Run'
 # app icon; bundled next to the code (PyInstaller unpacks data files into sys._MEIPASS)
 LOGO = os.path.join(getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__))), 'logo.ico')
@@ -99,6 +101,7 @@ def load_settings(path=None):
         'theme': lambda v: v in THEMES,
         'accent': lambda v: v == '' or is_hex(v),
         'font': lambda v: isinstance(v, str) and 0 < len(v) <= 60,
+        'off': lambda v: isinstance(v, list) and all(a in ACTIONS for a in v),
     }
     for k, ok in checks.items():
         if k in saved and ok(saved[k]):
@@ -370,11 +373,11 @@ class PetWidget(QWidget):
             self.pet.menu()
 
     def mouseMoveEvent(self, e):
-        if e.buttons() & Qt.LeftButton and self.pet.state == 'drag':
+        if e.buttons() & Qt.LeftButton and self.pet.state in ('drag', 'hang'):
             self.pet.drag()
 
     def mouseReleaseEvent(self, e):
-        if e.button() == Qt.LeftButton and self.pet.state == 'drag':
+        if e.button() == Qt.LeftButton and self.pet.state in ('drag', 'hang'):
             self.pet.drop()
 
 
@@ -387,6 +390,7 @@ class Pet:
         self.area = L, T, R, B = random.choice(app.allowed_areas())  # start on a monitor allowed in Settings
         self.x, self.y = random.randint(L, max(L, R - self.px)), T
         self.vx = self.vy = 0
+        self.spin = self.spin_v = self.sway = 0  # degrees: tumble after a throw by the leg, swing while held
         self.ledge = None  # the window this pet stands on, as (hwnd, left, top, right)
         self.dir = random.choice((-1, 1))
         self.frame = 0       # physics steps (30 a second): drives sprite animation and timers
@@ -417,17 +421,45 @@ class Pet:
         self.shown.clear()
 
     # --- mouse (screen pixels from Windows, the same units as the pet's position) ---
+    def body(self):
+        """Where the visible pet sits on its square: (left, top, right, bottom), from the picture's solid pixels."""
+        img = self.picture()
+        l, t, r, b = img.getbbox() or (0, 0, img.width, img.height)
+        dx, dy = (self.px - img.width) // 2, 0 if self.state == 'ceiling' else self.px - img.height
+        return l + dx, t + dy, r + dx, b + dy
+
     def grab(self):
+        """Picked up by the feet: hangs upside down by them. Anywhere else: reaches up and holds the pointer
+        with its hand (the top of the 'held' picture). Either way that spot glides to the pointer."""
         mx, my = cursor_pos()
-        self.set('drag')
-        self.ox, self.oy, self.vx, self.vy = mx - self.x, my - self.y, 0, 0  # keep the spot that was grabbed
+        l, t, r, b = self.body()
+        leg = self.state != 'ceiling' and my - self.y > t + 0.72 * (b - t)
+        self.ox, self.oy, self.vx, self.vy = mx - self.x, my - self.y, 0, 0  # starts at the spot that was clicked
+        self.spin = self.sway = 0
+        self.set('hang' if leg else 'drag')
+        l, t, r, b = self.body()
+        if leg:  # turned upside down, the feet (the bottom of the body) are on top
+            self.hx, self.hy = self.px - (l + r) / 2, self.px - b + 2
+        else:
+            self.hx, self.hy = (l + r) / 2, t + 2
         self.trail = [(time.perf_counter(), mx, my)]  # recent pointer positions, for the throw
 
-    def drag(self):
+    def follow(self, dt=0.0):
+        """Held: the grabbed spot eases onto the pointer; a pet held by the leg swings with the pointer."""
         mx, my = cursor_pos()
         now = time.perf_counter()
+        last = self.trail[-1]
         self.trail = [p for p in self.trail if now - p[0] < 0.1] + [(now, mx, my)]
+        k = min(1.0, dt * 14)
+        self.ox += (self.hx - self.ox) * k
+        self.oy += (self.hy - self.oy) * k
+        if self.state == 'hang' and now > last[0]:
+            v = (mx - last[1]) / (now - last[0])  # pointer speed, px/s: the body lags behind it
+            self.sway += (max(-30, min(30, v * 0.03)) - self.sway) * min(1.0, dt * 8)
         self.x, self.y = self.prev = mx - self.ox, my - self.oy
+
+    def drag(self):
+        self.follow()
         self.draw()  # follow the pointer at once, not on the next frame
 
     def drop(self):
@@ -439,6 +471,9 @@ class Pet:
             x1, y1 = x0, y0
         self.vx = max(-25, min(25, (x1 - x0) / dt * STEP))  # px per movement step
         self.vy = max(-25, min(25, (y1 - y0) / dt * STEP))
+        if self.state == 'hang':  # let go by the leg: tumble a little, then turn upright while falling
+            self.spin = 180 + self.sway
+            self.spin_v = -(1 if self.vx >= 0 else -1) * max(6, min(24, abs(self.vx) * 1.5))  # degrees per step
         self.update_area()  # dropped on another monitor: live there
         self.set('fall')
 
@@ -491,8 +526,16 @@ class Pet:
             if (w and not self.ledge and self.vy > 0 and w[1] <= cx <= w[3] and bottom <= w[2] <= self.y + px
                     and w[2] - px > T):  # dropping past a window's top edge: land on it
                 self.ledge, floor = w, w[2] - px
+            if self.spin:  # thrown by the leg: spin, slow down, then settle upright
+                self.spin += self.spin_v
+                self.spin_v *= 0.88
+                if abs(self.spin_v) < 3:
+                    upright = round(self.spin / 360) * 360
+                    self.spin += (upright - self.spin) * 0.3
+                    if abs(upright - self.spin) < 3:
+                        self.spin = 0
             if self.y >= floor:
-                self.y, self.vx, self.vy = floor, 0, 0
+                self.y, self.vx, self.vy, self.spin = floor, 0, 0, 0
                 self.land()
         elif s == 'land':
             if self.timer <= 0:
@@ -505,7 +548,7 @@ class Pet:
                     return
                 self.dir = 1 if mx > cx else -1
             self.x += (2 if s == 'walk' else 4) * speed * self.dir
-            if s == 'run' and random.random() < 0.004:  # tripped over its own feet
+            if s == 'run' and random.random() < 0.004 and 'lie' not in self.app.settings['off']:  # tripped over its own feet
                 self.set('lie', 45)
             if not L <= self.x <= R - px:
                 self.x = max(L, min(R - px, self.x))
@@ -515,7 +558,7 @@ class Pet:
                     else:
                         self.ledge, self.vx, self.vy = None, self.dir * 3, -6
                         self.set('fall')
-                elif random.random() < 0.5:
+                elif random.random() < 0.5 and 'climb' not in self.app.settings['off']:
                     self.set('climb')
                 else:
                     self.dir = -self.dir
@@ -544,10 +587,11 @@ class Pet:
         """Pick what to do next while standing around."""
         mx, my = cursor_pos()
         L, T, R, B = self.area
-        choices = ['walk'] * 3 + ['idle'] * 2 + ['sit'] * 2 + ['run', 'lie', 'dance']
-        if L <= mx <= R and T <= my <= B:
+        off = self.app.settings['off']
+        choices = [m for m in ['walk'] * 3 + ['idle'] * 2 + ['sit'] * 2 + ['run', 'lie', 'dance'] if m not in off]
+        if L <= mx <= R and T <= my <= B and 'chase' not in off:
             choices.append('chase')
-        if (w and not self.ledge and w[2] < self.y and w[3] - w[1] > self.px * 2
+        if (w and not self.ledge and 'jump' not in off and w[2] < self.y and w[3] - w[1] > self.px * 2
                 and w[1] < R - self.px and w[3] > L + self.px):  # only windows on this pet's screen
             choices.append('jump')
         move = random.choice(choices)
@@ -575,9 +619,11 @@ class Pet:
         dt, self.last = min(0.1, now - self.last), now
         self.t += dt
         x, y = self.x, self.y
-        if self.state == 'drag':
+        if self.state in ('drag', 'hang'):
             self.acc = 0.0
-            if self.t % 1 > 0.6:  # held still for a moment: wriggle to get free
+            self.follow(dt)
+            x, y = self.x, self.y
+            if self.state == 'drag' and self.t % 1 > 0.6:  # held still for a moment: wriggle to get free
                 x += 2 if self.t % 0.12 < 0.06 else -2
         else:
             self.acc += dt
@@ -594,6 +640,8 @@ class Pet:
     def picture(self):
         """This tick's PIL picture of the pet."""
         d, f, s = self.dir, self.frame, self.state
+        if s == 'hang':  # held by the leg: its falling pose, turned upside down when drawn
+            s = 'fall'
         if s == 'dance':  # turn to and fro to the beat
             d = 1 if f // 12 % 2 else -1
         if self.app.pack:  # character pack: that state's animation (or a stand-in), mirrored when facing left
@@ -616,17 +664,30 @@ class Pet:
             return
         img = self.picture()
         top = self.state == 'ceiling'  # hanging: picture hugs the top edge, not the floor
-        key = (id(img), top)
-        data = self.shown.get(key)
-        if data is None:
+        hang = self.state == 'hang'
+        # turn: swing while held by the leg (about the feet), tumble after that throw (about the middle)
+        turn = round(self.sway / 3) * 3 if hang else round(self.spin / 6) * 6 % 360 if self.state == 'fall' else 0
+        key = (id(img), top, hang, turn)
+        shown = self.shown.get(key)
+        if shown is None:
             from PIL import Image
             canvas = Image.new('RGBA', (self.px, self.px), (0, 0, 0, 0))
             canvas.alpha_composite(img, ((self.px - img.width) // 2, 0 if top else self.px - img.height))
-            data = canvas.convert('RGBa').tobytes('raw', 'BGRa')  # premultiplied, as Windows wants
+            if hang:
+                canvas = canvas.transpose(Image.Transpose.ROTATE_180)
+            pad = 0
+            if turn:  # a bigger square so the turned picture isn't cut off at the corners
+                pad = self.px // 3
+                big = Image.new('RGBA', (self.px + 2 * pad,) * 2, (0, 0, 0, 0))
+                big.paste(canvas, (pad, pad))
+                canvas = big.rotate(turn, Image.BICUBIC, center=(self.hx + pad, self.hy + pad) if hang else None)
+            shown = canvas.convert('RGBa').tobytes('raw', 'BGRa'), canvas.width, pad  # premultiplied, as Windows wants
             if len(self.shown) > 600:
                 self.shown.clear()
-            self.shown[key] = data
-        show_layered(self.win.hwnd, data, self.px, self.px, self.x if x is None else x, self.y if y is None else y)
+            self.shown[key] = shown
+        data, size, pad = shown
+        show_layered(self.win.hwnd, data, size, size, (self.x if x is None else x) - pad,
+                     (self.y if y is None else y) - pad)
 
 
 def pet_px(settings):
@@ -1101,6 +1162,35 @@ def selftest():
             p.draw()
             img = blob_image(40, '#7ecf8f', style)
             assert img.size == (40, 40) and img.getpixel((24, 24))[3] == 255, style  # smooth picture, solid body
+        global cursor_pos
+        real_cursor = cursor_pos
+        p.x, p.y, p.state = 100, 100, 'idle'
+        l, t, r, b = p.body()
+        cursor_pos = lambda: (100 + (l + r) // 2, 100 + b - 2)  # grab by the feet: hangs upside down
+        p.grab()
+        assert p.state == 'hang' and p.hy < p.px / 3
+        for _ in range(30):
+            p.follow(1 / 60)
+        p.draw()
+        assert abs(p.ox - p.hx) < 1 and abs(p.oy - p.hy) < 1  # the feet reached the pointer
+        p.trail = [(time.perf_counter() - 0.05, 0, 100), (time.perf_counter(), 60, 100)]
+        p.drop()
+        assert p.state == 'fall' and p.spin
+        for _ in range(60):
+            p.draw()
+            p.step()
+        assert p.spin == 0 or p.state != 'fall'  # tumbled, then upright again
+        p.x, p.y, p.state = 100, 100, 'idle'
+        cursor_pos = lambda: (100 + (l + r) // 2, 100 + t + 2)  # grab by the head: holds on with its hand
+        p.grab()
+        assert p.state == 'drag'
+        cursor_pos = real_cursor
+        app.settings['off'] = [a for a in ACTIONS if a != 'sit']
+        for _ in range(20):
+            p.set('idle', 1)
+            p.next_move(None, 0)
+            assert p.state in ('idle', 'sit'), p.state
+        app.settings['off'] = []
         app.open_settings()
         panel = app.panel
         for tab in ('home', 'characters', 'customize', 'settings'):
