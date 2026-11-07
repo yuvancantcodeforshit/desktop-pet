@@ -593,12 +593,12 @@ class Pet:
         if s == 'fall':
             bottom = self.y + px
             # shortcut: Yellow's fall pictures ride a staff, by name. From 450 px above the floor the staff turns
-            # gem-down like a rocket (tilt: 0-6 sixths of the turn, done 220 px up); then he hangs off it by one
-            # hand. Turned, he falls up to 15% slower; he always lands softly
+            # gem-down in 5 frames (tilt 0-4, one per 70 px; see draw_staff), ending upright with him on it like a
+            # climber. Turned, he falls up to 15% slower; he always lands softly
             staff = self.app.pack and not self.leap and self.app.settings['character'] == 'Yellow'
-            self.tilt = round(6 * max(0.0, min(1.0, (450 - (floor - self.y)) / 230))) if staff else 0
+            self.tilt = max(0, min(4, int((450 - (floor - self.y)) / 70) + 1)) if staff else 0
             if not self.leap and self.vy >= 0:  # a plain drop falls at a steady 10 px a step; throws keep gravity
-                self.vy = min(self.vy + GRAVITY, 10 * (1 - 0.15 * self.tilt / 6))
+                self.vy = min(self.vy + GRAVITY, 10 * (1 - 0.15 * self.tilt / 4))
             else:
                 self.vy += GRAVITY
             if staff:  # sparkles fly off the gem, left behind as he comes down
@@ -810,9 +810,11 @@ class Pet:
                      round(self.y if y is None else y) + dy)
 
     def draw_staff(self, img, x, y):
-        """Yellow riding his staff down. self.tilt (sixths) turns the picture until the gem points straight
-        down like a rocket; fully turned, he hangs off the upright staff by one hand (his swing pose, like a
-        pirate on the rigging). Sparkles stream off the gem."""
+        """Yellow riding his staff down, in 5 frames (self.tilt 0-4) as the staff turns gem-down:
+        0 riding as drawn; 1-2 the staff a quarter / half way round, him still standing on it, leaning only a
+        little; 3 the staff steep, him on it like a climber, leaning with it; 4 the staff upright with the gem at
+        the bottom: hand near the top, feet on it one above the other (his last climb picture). The staff is
+        redrawn (pole line + the gem cut out of the picture) so it can turn on its own. Sparkles stream off the gem."""
         from PIL import Image, ImageDraw
         px = self.px
         pad = px // 2  # room for sparkles above and beside him
@@ -824,31 +826,55 @@ class Pet:
             need = (90 - math.degrees(math.atan2(gem[1] - tip[1], gem[0] - tip[0])) + 180) % 360 - 180
             W = px + 2 * pad
             base = Image.new('RGBA', (W, W), (0, 0, 0, 0))
-            if self.tilt < 6:  # riding, part way round
-                ang = -need * self.tilt / 6  # PIL turns counter-clockwise
-                ox, oy = pad + (px - img.width) // 2, pad + px - img.height
+            k = px / 128
+
+            def turn(p, c, deg):  # p turned deg screen-clockwise about c
+                r = math.radians(deg)
+                dx, dy = p[0] - c[0], p[1] - c[1]
+                return c[0] + dx * math.cos(r) - dy * math.sin(r), c[1] + dx * math.sin(r) + dy * math.cos(r)
+
+            def staff(g, t, deg):
+                ImageDraw.Draw(base).line((g, t), fill=pole, width=max(2, round(4 * k)))
+                gi = gem_img.rotate(-deg, Image.BICUBIC)
+                base.alpha_composite(gi, (round(g[0] - gi.width / 2), round(g[1] - gi.height / 2)))
+
+            ox, oy = pad + (px - img.width) // 2, pad + px - img.height
+            if self.tilt == 0:
                 base.alpha_composite(img, (ox, oy))
-                c = W / 2
-                base = base.rotate(ang, Image.BICUBIC, center=(c, c))
-                a, dx, dy = math.radians(ang), gem[0] + ox - c, gem[1] + oy - c
-                g = (c + dx * math.cos(a) + dy * math.sin(a), c - dx * math.sin(a) + dy * math.cos(a))
-            else:  # upright staff, gem at the floor, and him hanging off it by one hand
-                d = ImageDraw.Draw(base)
-                cx, bottom = W / 2, pad + px - gem_img.height / 2
-                top = bottom - length
-                d.line((cx, top, cx, bottom), fill=pole, width=max(2, round(4 * px / 128)))
-                gi = gem_img.rotate(-need, Image.BICUBIC)
-                base.alpha_composite(gi, (round(cx - gi.width / 2), round(bottom - gi.height / 2)))
+                g = (gem[0] + ox, gem[1] + oy)
+            elif self.tilt <= 2:  # staff turns about its middle; his front foot rides along on it
+                deg = need * self.tilt / 4
+                body = only_yellow(img)
+                a = body.getchannel('A').tobytes()
+                solid = [(i % body.width, i // body.width) for i in range(len(a)) if a[i] > 128] or [(0, 0)]
+                foot = max(solid, key=lambda p: p[1])
+                c = ((gem[0] + tip[0]) / 2 + ox, (gem[1] + tip[1]) / 2 + oy)
+                g, t = turn((gem[0] + ox, gem[1] + oy), c, deg), turn((tip[0] + ox, tip[1] + oy), c, deg)
+                staff(g, t, deg)
+                f0 = (foot[0] + ox, foot[1] + oy)
+                f1 = turn(f0, c, deg)
+                big = Image.new('RGBA', (W, W), (0, 0, 0, 0))
+                big.alpha_composite(body, (ox, oy))
+                big = big.rotate(-deg * (0.35 if self.tilt == 1 else 0.4), Image.BICUBIC, center=f0)  # leans a little
+                base.alpha_composite(big, (round(f1[0] - f0[0]), round(f1[1] - f0[1])))
+            else:  # on the staff like a climber on a wall (the wall is his left side in the mirrored picture)
                 frames = self.app.pack[0]
-                # his swing pose, facing away from the side he rode on, so he leans out from the staff
-                side = 1 if self.dir < 0 else 0
-                poses = list({id(p): p for p in frames.get('ceiling', frames['drag'])[1 - side]}.values())
+                side = 0 if self.dir > 0 else 1
+                poses = list({id(p): p for p in frames.get('climb', frames['drag'])[1 - side]}.values())
                 pose = poses[-1]
-                hx, hy, _ = self.grip(pose)  # the hand tip, on the px square the pose is centred in
-                ox, oy = (px - pose.width) // 2, px - pose.height
-                base.alpha_composite(pose, (round(cx - hx + ox), round(top + length * 0.15 - hy + oy)))
-                g = (cx, bottom)
-            cache[key] = img, base, g, (1 if gem[0] > tip[0] else -1) if self.tilt < 6 else 1
+                l, t_, r, b = pose.getbbox() or (0, 0, pose.width, pose.height)
+                wx = (l + 2) if side == 0 else (r - 2)  # the wall side
+                lean = 25 * (1 if side == 0 else -1) if self.tilt == 3 else 0  # top tips the way frame 2 went
+                px0 = pad + (px - pose.width) // 2
+                py0 = pad + px - (b + 14 * k + gem_img.height / 2)  # gem just above the floor
+                top, bottom = (wx + px0, t_ + py0 - 4 * k), (wx + px0, b + py0 + 14 * k)
+                piv = ((top[0] + bottom[0]) / 2, (top[1] + bottom[1]) / 2)
+                g, tp = turn(bottom, piv, lean), turn(top, piv, lean)
+                staff(g, tp, need)
+                big = Image.new('RGBA', (W, W), (0, 0, 0, 0))
+                big.alpha_composite(pose, (round(px0), round(py0)))
+                base.alpha_composite(big.rotate(-lean, Image.BICUBIC, center=piv))
+            cache[key] = img, base, g, (1 if gem[0] > tip[0] else -1)
         _, base, (gx, gy), side = cache[key]
         im = base.copy()
         d = ImageDraw.Draw(im)
@@ -860,6 +886,16 @@ class Pet:
             d.line((cx, cy - r, cx, cy + r), fill=col, width=max(1, round(k)))
         show_layered(self.win.hwnd, im.convert('RGBa').tobytes('raw', 'BGRa'), im.width, im.height,
                      round(self.x if x is None else x) - pad, round(self.y if y is None else y) - pad)
+
+
+def only_yellow(img):
+    """The picture with everything but the yellow body cleared (the staff and sparkles taken out)."""
+    from PIL import Image
+    raw = bytearray(img.tobytes())
+    for i in range(0, len(raw), 4):
+        if not (raw[i] > 200 and raw[i + 1] > 140 and raw[i + 2] < 90):
+            raw[i + 3] = 0
+    return Image.frombytes('RGBA', img.size, bytes(raw))
 
 
 def staff_parts(img):
@@ -883,7 +919,8 @@ def staff_parts(img):
     gem, tip = (ends[0], ends[1]) if bulk[0] > bulk[1] else (ends[1], ends[0])
     near = [p for p in pts if math.dist(p[:2], gem) < 22 * k]
     gx, gy = sum(p[0] for p in near) / len(near), sum(p[1] for p in near) / len(near)
-    pole = Counter(p[2] for p in pts if math.dist(p[:2], gem) > 30 * k).most_common(1)
+    # the pole's face colour: the brightest of its few commonest colours (the rest are its dark edges)
+    pole = sorted(Counter(p[2] for p in pts if math.dist(p[:2], gem) > 30 * k).most_common(5), key=lambda c: -sum(c[0][:3]))
     r = int(16 * k)
     cut = Image.new('RGBA', (2 * r, 2 * r), (0, 0, 0, 0))
     for x, y, c in pts:
