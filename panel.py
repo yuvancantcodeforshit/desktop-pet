@@ -15,13 +15,20 @@ COLORS = (('Mint', '#7ecf8f'), ('Sky', '#7cc4f2'), ('Lavender', '#b9a3f0'), ('Pe
           ('Coral', '#f2847a'), ('Rose', '#f29fc4'), ('Teal', '#4fc1b3'), ('Grey', '#b0b0b0'), ('Midnight', '#4a5a8a'),
           ('Snow', '#f4f4f4'), ('Lime', '#b5e35a'))
 ACCENTS = ('#57c8ff', '#2f60d8', '#4fc1b3', '#7ecf8f', '#f2e27a', '#ff9e7a', '#ff6b6b', '#f29fc4', '#b9a3f0', '#e8e8e8')
-FONTS = ('Segoe UI', 'Segoe UI Variable Display', 'Bahnschrift', 'Cascadia Mono', 'Trebuchet MS', 'Comic Sans MS', 'Georgia')
+FONTS = ('Segoe UI Variable', 'Segoe UI', 'Bahnschrift', 'Cascadia Mono', 'Trebuchet MS', 'Comic Sans MS', 'Georgia')
 RESTYLE = {'theme', 'accent', 'font'}         # redraw the whole window
 REFRESH = {'character', 'style', 'color'}     # redraw the pages that show the character; sliders redraw nothing
 W, H, MIN_H = 460, 660, 360  # width is fixed; only the height can be dragged
 DANGER = '#ff6b6b'
 CLOSE_RED = '#c42b1c'  # Windows' own close-button red
 TIP_KEY = '#010204'    # colour made see-through around tooltip pills
+
+
+def animations_on():
+    """Windows' 'Animation effects' setting (Settings > Accessibility > Visual effects)."""
+    v = ctypes.c_int(1)
+    ctypes.windll.user32.SystemParametersInfoW(0x1042, 0, ctypes.byref(v), 0)  # SPI_GETCLIENTAREAANIMATION
+    return bool(v.value)
 
 
 def shade(hex_color, k):
@@ -62,7 +69,7 @@ class Tip:
         t.attributes('-topmost', True)
         t.attributes('-transparentcolor', TIP_KEY)  # see-through corners around the rounded pill
         ctk.CTkLabel(t, text=self.text, fg_color=c['tip'], bg_color=TIP_KEY, text_color='#f2f2f2', corner_radius=8,
-                     font=ctk.CTkFont(family=self.panel.family, size=11), height=24, padx=10).pack()
+                     font=self.panel.font(11), height=24, padx=10).pack()
         t.update_idletasks()
         x = self.w.winfo_rootx() + (self.w.winfo_width() - t.winfo_width()) // 2
         t.geometry(f'+{x}+{self.w.winfo_rooty() + self.w.winfo_height() + 4}')
@@ -80,6 +87,8 @@ class SettingsWindow:
         self.preview = None
         w = self.win = ctk.CTkToplevel(app.root)
         w.overrideredirect(True)  # our own title bar instead of the white Windows one
+        w.attributes('-alpha', 0)  # fades in once placed (fit_on_screen)
+        self.ready = False
         w.attributes('-topmost', True)
         if os.path.exists(core.LOGO):
             w.iconbitmap(core.LOGO)  # also stops CustomTkinter swapping in its own icon
@@ -100,6 +109,8 @@ class SettingsWindow:
         # straight to Tk: CustomTkinter's geometry() would scale the position as well
         tk.Wm.wm_geometry(w, f'+{L + (R - L - w.winfo_width()) // 2}+{T + (B - T - w.winfo_height()) // 2}')
         w.after(50, self.taskbar_button)
+        self.ready = True
+        self.fade(1)
         self.animate()
 
     # --- window chrome ---
@@ -141,14 +152,31 @@ class SettingsWindow:
                 self.win.unbind('<Map>')
         self.win.bind('<Map>', restored)
 
+    def fade(self, to, then=None, steps=8):
+        """Ease the window's opacity to `to` over ~130 ms (ease-out); instant if Windows animations are off."""
+        if not animations_on():
+            steps = 1
+        start = float(self.win.attributes('-alpha'))
+
+        def tick(i=1):
+            try:
+                k = 1 - (1 - i / steps) ** 3
+                self.win.attributes('-alpha', start + (to - start) * k)
+                if i < steps:
+                    self.win.after(16, tick, i + 1)
+                elif then:
+                    then()
+            except tk.TclError:
+                pass  # window closed mid-fade
+        tick()
+
     def hide(self):
-        """Eye button: tuck the window away; the tray icon or right-click > Settings brings it back."""
-        self.win.withdraw()
+        """Eye button: fade the window away; the tray icon or right-click > Settings brings it back."""
+        self.fade(0, self.win.withdraw)
 
     def close(self):
-        self.win.destroy()
-        self.app.panel = None
-        self.app.quit_if_idle()
+        w, self.app.panel = self.win, None
+        self.fade(0, lambda: (w.destroy(), self.app.quit_if_idle()))
 
     def show(self, tab):
         """Switch tabs. Every page stays placed in the same spot; the chosen one is raised to the top.
@@ -158,7 +186,12 @@ class SettingsWindow:
             self.pages[tab] = self.make_page(tab)
         self.raise_page(tab)
         self.color_tabs()
+        hidden = self.win.state() != 'normal' or float(self.win.attributes('-alpha')) < 1
+        if hidden and self.ready:
+            self.win.attributes('-alpha', 0)
         self.win.deiconify()
+        if hidden and self.ready:
+            self.fade(1)  # comes back the way it left
         self.win.lift()
         self.win.focus_force()  # take the foreground, so the first click lands on our buttons
 
@@ -205,8 +238,12 @@ class SettingsWindow:
                       border=shade(card, 0.88) if light else shade(card, 1.32),  # 1px edge: dark cards need it
                       btn_hover=shade(bg, 0.88) if light else shade(bg, 2.1),
                       tip='#3a3a3a' if light else shade(card, 1.45))
-        self.family = s['font'] if s['font'] in tkfont.families(self.app.root) else 'Segoe UI'
-        self.font = lambda size=13, bold=False: ctk.CTkFont(family=self.family, size=size,
+        have = set(tkfont.families(self.app.root))
+        self.family = s['font'] if s['font'] in have or s['font'] + ' Text' in have else 'Segoe UI'
+        # Segoe UI Variable is Windows' system font with optical sizes: Display cut for headings, Text for body
+        optical = lambda size: (self.family + (' Display' if size >= 16 else ' Text')
+                                if self.family + ' Text' in have else self.family)
+        self.font = lambda size=13, bold=False: ctk.CTkFont(family=optical(size), size=size,
                                                             weight='bold' if bold else 'normal')
         ctk.set_appearance_mode('light' if light else 'dark')
         for child in self.win.winfo_children():
@@ -744,7 +781,8 @@ class SettingsWindow:
     def sub_font(self, c):
         self.label(c, 'Font', 13, True).pack(anchor='w', padx=12, pady=(12, 4))
         have = set(tkfont.families(self.app.root))
-        ctk.CTkOptionMenu(c, values=[f for f in FONTS if f in have], command=lambda v: self.change('font', v),
+        ctk.CTkOptionMenu(c, values=[f for f in FONTS if f in have or f + ' Text' in have],
+                          command=lambda v: self.change('font', v),
                           variable=tk.StringVar(value=self.app.settings['font']), width=240, font=self.font(12),
                           dropdown_font=self.font(12), fg_color=self.c['hover'], button_color=self.c['hover'],
                           button_hover_color=self.c['acc'], text_color=self.c['text']).pack(anchor='w', padx=12)
