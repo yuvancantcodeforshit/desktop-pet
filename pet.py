@@ -41,7 +41,7 @@ THEMES = {
     'Light':    ('#f3f3f3', '#ffffff', '#2f60d8', '#1a1a1a', '#666666'),
 }
 DEFAULTS = {'color': '#7ecf8f', 'speed': 1.0, 'size': 1.0, 'pets': 1, 'monitors': [], 'character': '',
-            'style': 'Blob', 'theme': 'Midnight', 'accent': '', 'font': 'Segoe UI'}
+            'style': 'Blob', 'theme': 'Midnight', 'accent': '', 'font': 'Segoe UI Variable'}
 RUN_KEY = r'Software\Microsoft\Windows\CurrentVersion\Run'
 # app icon; bundled next to the code (PyInstaller unpacks data files into sys._MEIPASS)
 LOGO = os.path.join(getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__))), 'logo.ico')
@@ -395,15 +395,24 @@ class Pet:
     def grab(self, e):
         self.set('drag')
         self.ox, self.oy, self.vx, self.vy = e.x, e.y, 0, 0
+        self.trail = [(time.perf_counter(), e.x_root, e.y_root)]  # recent pointer positions, for the throw
 
     def drag(self, e):
         nx, ny = e.x_root - self.ox, e.y_root - self.oy
-        self.vx, self.vy = nx - self.x, ny - self.y
+        now = time.perf_counter()
+        self.trail = [p for p in self.trail if now - p[0] < 0.1] + [(now, e.x_root, e.y_root)]
         self.x, self.y = self.prev = nx, ny
         self.draw(nx, ny)  # follow the pointer at once, not on the next frame
 
     def drop(self, _):
-        self.vx, self.vy = max(-25, min(25, self.vx)), max(-25, min(25, self.vy))  # throw
+        # throw with the pointer's real speed over its last 0.1 s (one jittery event no longer decides it)
+        t0, x0, y0 = self.trail[0]
+        t1, x1, y1 = self.trail[-1]
+        dt = max(t1 - t0, 1 / 60)
+        if time.perf_counter() - t1 > 0.08:  # held still before letting go: just drop
+            x1, y1 = x0, y0
+        self.vx = max(-25, min(25, (x1 - x0) / dt * STEP))  # px per movement step
+        self.vy = max(-25, min(25, (y1 - y0) / dt * STEP))
         self.update_area()  # dropped on another monitor: live there
         self.set('fall')
 
