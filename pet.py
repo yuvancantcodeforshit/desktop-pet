@@ -640,8 +640,8 @@ class Pet:
     def picture(self):
         """This tick's PIL picture of the pet."""
         d, f, s = self.dir, self.frame, self.state
-        if s == 'hang':  # held by the leg: its falling pose, turned upside down when drawn
-            s = 'fall'
+        if s == 'hang' and self.app.pack:  # held by the leg: a pack's struggle animation, turned upside down when drawn
+            s = 'drag'
         if s == 'dance':  # turn to and fro to the beat
             d = 1 if f // 12 % 2 else -1
         if self.app.pack:  # character pack: that state's animation (or a stand-in), mirrored when facing left
@@ -651,8 +651,8 @@ class Pet:
             i = int((f - self.since) * fps / 30)
             return seq[min(i, len(seq) - 1) if s in ONCE else i % len(seq)]
         step = 0
-        if s in ('walk', 'climb', 'ceiling', 'run', 'chase', 'dance'):
-            period = 0.2 if s in ('run', 'chase') else 0.34  # seconds per stride
+        if s in ('walk', 'climb', 'ceiling', 'run', 'chase', 'dance', 'hang'):
+            period = 0.2 if s in ('run', 'chase') else 0.3 if s == 'hang' else 0.34  # seconds per stride / flail
             phase = int(self.t % period / period * 12)  # 12 poses per stride, drawn once each and reused
             step = round(3 * math.sin(2 * math.pi * phase / 12), 1)
         blink = f % 100 < 4 or s == 'sit' and f % 200 < 100 or s == 'lie'
@@ -742,10 +742,15 @@ def blob_image(size, color, style='Blob', f=50):
 def draw_blob(c, color, s='idle', d=1, f=0, step=0, style='Blob'):
     """The default pet at 64 px on canvas c: state s, facing d (-1/1), animation frame f, foot step offset,
     style one of BLOB_STYLES (ears, ghost tail)."""
-    top = 26 if s in ('sit', 'land') else 34 if s == 'lie' else 20 if s == 'ceiling' else 14 + abs(step) * 0.7
+    top = (26 if s in ('sit', 'land') else 34 if s == 'lie' else 20 if s == 'ceiling' else 8 if s == 'hang'
+           else 14 + abs(step) * 0.7)
     if s == 'ceiling':  # hanging from the top edge: arms up, one hand forward per step
         c.create_line(24, top + 8, 22 + step, 0, fill=LINE, width=3)
         c.create_line(40, top + 8, 42 - step, 0, fill=LINE, width=3)
+    if s == 'hang':  # held up by one ankle. Drawn feet-down here; Pet.draw turns it over, so these arms dangle and flail
+        for x, hx in ((16, 13 + 2 * step), (48, 51 - 2 * step)):
+            c.create_line(x, top + 24, hx, 8, fill=LINE, width=3)
+            c.create_oval(hx - 4, 4, hx + 4, 12, fill=LINE, outline='')
     if style == 'Cat':  # ears behind the body
         for x0, x1, x2 in ((12, 18, 28), (36, 46, 52)):
             c.create_polygon(x0, top + 10, x1, top - 8, x2, top + 2, fill=color, outline=LINE, width=2)
@@ -760,6 +765,11 @@ def draw_blob(c, color, s='idle', d=1, f=0, step=0, style='Blob'):
         c.create_line(56, top + 20, 56, 54, fill=LINE, width=2)
         for x in (8, 24, 40):
             c.create_oval(x, 46 - step, x + 16, 60 - step, fill=color, outline='')
+    elif s == 'hang':  # held leg straight out the middle, the free foot flopping at the side
+        c.create_line(32, top + 36, 32, 58, fill=LINE, width=5)
+        c.create_oval(26, 55, 38, 63, fill=LINE, outline='')
+        c.create_oval(44, 42 - step, 56, 50 - step, fill=LINE, outline='')
+        c.create_oval(8, top, 56, 50, fill=color, outline=LINE, width=2)
     else:
         # feet (dangle while dragged)
         fy = 56 if s in ('drag', 'ceiling') else 52
@@ -769,7 +779,7 @@ def draw_blob(c, color, s='idle', d=1, f=0, step=0, style='Blob'):
         c.create_oval(8, top, 56, 58, fill=color, outline=LINE, width=2)
     # face, looks where it's going
     ex, ey = 32 + d * 5, top + 16
-    if s == 'fall' or s == 'drag':
+    if s in ('fall', 'drag', 'hang'):
         for dx in (-8, 8):
             c.create_oval(ex + dx - 4, ey - 4, ex + dx + 4, ey + 4, fill='white', outline=LINE)
             c.create_oval(ex + dx - 1, ey - 1, ex + dx + 1, ey + 1, fill=LINE, outline='')
