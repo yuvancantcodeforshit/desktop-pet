@@ -392,7 +392,6 @@ class Pet:
         self.vx = self.vy = 0
         self.spin = self.spin_v = 0  # degrees, degrees per step: tumble in the air after a throw
         self.th = self.om = 0.0  # radians, radians/s: swing about the held hand or foot (0: hanging straight down)
-        self.getting_up = False  # crashed flat: gets up (the pack's landing animation) after lying a moment
         self.ledge = None  # the window this pet stands on, as (hwnd, left, top, right)
         self.dir = random.choice((-1, 1))
         self.frame = 0       # physics steps (30 a second): drives sprite animation and timers
@@ -409,13 +408,14 @@ class Pet:
 
     def land(self, hard=False, full=False):
         """Touched down. Packs: a soft landing plays the second half of the landing animation (crouch, stand); a
-        hard one lies flat a moment, then plays all of it (crawl up, stand). full: all of it now. Blob: quick squash."""
+        hard one crashes face down (its first picture) with a tiny hop, lies a moment, then plays all of it (crawl
+        up, stand). full: all of it now. Blob: quick squash."""
         frames = self.app.pack[0] if self.app.pack else None
         if frames is None:
             self.set('land', 6)
-        elif hard and 'lie' in frames:
-            self.set('lie', 20)
-            self.getting_up = True
+        elif hard and 'land' in frames:
+            self.set('crash', 22)
+            self.vy = -3.5  # the body thumps the floor and lifts a few px
         elif 'land' in frames:
             ticks = round(len(frames['land'][0]) * 30 / self.app.pack[1])
             skip = 0 if full else ticks // 2
@@ -444,7 +444,7 @@ class Pet:
         l, t, r, b = self.body()
         leg = self.state != 'ceiling' and my - self.y > t + 0.72 * (b - t)
         self.vx = self.vy = self.spin = self.spin_v = self.om = 0
-        self.th, self.getting_up = 0.0, False
+        self.th = 0.0
         self.set('hang' if leg else 'drag')
         px = self.px
         if not self.app.pack:  # the blob's held foot and raised hand are drawn at known spots (64 px grid)
@@ -575,9 +575,14 @@ class Pet:
         elif s == 'land':
             if self.timer <= 0:
                 self.set('idle')
-        elif s == 'lie' and self.getting_up and self.timer <= 0:  # crashed: now gets up
-            self.getting_up = False
-            self.land(full=True)
+        elif s == 'crash':  # face down after a hard landing: a little hop off the floor, then lies still
+            if self.vy:
+                self.y += self.vy
+                self.vy += GRAVITY
+                if self.y >= floor:
+                    self.y, self.vy = floor, 0
+            if self.timer <= 0:
+                self.land(full=True)
         elif s in ('walk', 'run'):
             self.x += (2 if s == 'walk' else 4) * speed * self.dir
             if s == 'run' and random.random() < 0.004 and 'lie' not in self.app.settings['off']:  # tripped over its own feet
@@ -673,6 +678,8 @@ class Pet:
             frames, fps = self.app.pack
             if s == 'fall' and 'ceiling' in frames:  # in the air: the leap poses (swing), not the pack's fall pictures
                 s = 'ceiling'
+            if s == 'crash' and 'land' in frames:  # crashed: face down, the landing animation's first picture
+                return frames['land'][1 if d < 0 else 0][0]
             pair = next((frames[k] for k in (s,) + STAND_INS.get(s, ()) if k in frames), frames['idle'])
             seq = pair[1] if d < 0 else pair[0]
             i = int((f - self.since) * fps / 30)
