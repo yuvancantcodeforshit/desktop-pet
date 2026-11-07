@@ -395,6 +395,7 @@ class Pet:
         self.lean, self.pose = 0.0, None  # held by the hand: the shown picture's own body angle; (picture, when)
         self.sparks = []  # Yellow's staff fall: sparkles off the gem, [x, y, vx, vy, life]
         self.rock = 0  # degrees: rocking on its back after landing upside down
+        self.dust = []  # TDL's landing: puffs along the floor, [x, y, vx, vy, life, size] from his feet
         self.ledge = None  # the window this pet stands on, as (hwnd, left, top, right)
         self.dir = random.choice((-1, 1))
         self.frame = 0       # physics steps (30 a second): drives sprite animation and timers
@@ -578,6 +579,9 @@ class Pet:
 
     # --- behaviour ---
     def step(self):
+        if self.dust:  # TDL's landing dust: slows, drifts up a touch, grows and fades
+            self.dust = [[x + vx, y + vy, vx * 0.88, vy * 0.95, life - 1, size * 1.05]
+                         for x, y, vx, vy, life, size in self.dust if life > 1]
         L, T, R, B = self.area
         px, speed = self.px, self.app.settings['speed']
         floor, s = B - px, self.state
@@ -625,8 +629,14 @@ class Pet:
                 # how it meets the floor: upside down = on its back; sideways or from high up (300+ px) = a crash;
                 # never off the staff
                 back = abs(self.spin) > 120 and self.app.pack and 'lie' in self.app.pack[0]
-                hard = not staff and (self.vy > 30 or abs(self.spin) > 50)
+                tdl = self.app.pack and not self.leap and self.app.settings['character'] == 'TDL'  # by name
+                hard = not (staff or tdl) and (self.vy > 30 or abs(self.spin) > 50)
                 self.sparks = []
+                if tdl:  # slams down: dust bursts out both ways along the floor (the taskbar's top edge)
+                    k = px / 128
+                    self.dust = [[side * random.uniform(0, 6) * k, 0.0, side * random.uniform(4, 15) * k,
+                                  -random.uniform(0, 1.2) * k, random.randint(16, 26), random.uniform(5, 11) * k]
+                                 for side in (-1, 1) for _ in range(13)]
                 self.vx, self.vy, self.spin, self.spin_v = 0, 0, 0, 0
                 if back:
                     self.set('backland', 22)
@@ -740,6 +750,10 @@ class Pet:
             frames, fps = self.app.pack
             if self.state == 'drag':
                 return self.pose[0] if getattr(self, 'pose', None) else self.held_pose()
+            if (s == 'fall' and not self.leap and self.app.settings['character'] == 'TDL'
+                    and 'fall' in frames):  # by name: his fall picture is drawn stretched tall; shown at 75% height
+                img = frames['fall'][1 if d < 0 else 0][0]
+                return unstretched(img, self.app)
             if s == 'fall' and self.leap and 'ceiling' in frames:  # thrown or jumping: the leap poses (swing)
                 s = 'ceiling'
             if s == 'crash' and 'land' in frames:  # crashed: face down, the landing animation's first picture
@@ -780,6 +794,8 @@ class Pet:
         if not self.win.isVisible():
             return
         img = self.picture()
+        if self.dust:
+            return self.draw_dust(img, x, y)
         if self.state == 'fall' and self.app.pack and not self.leap and self.app.settings['character'] == 'Yellow':
             return self.draw_staff(img, x, y)
         top = self.state == 'ceiling'  # hanging: picture hugs the top edge, not the floor
@@ -824,6 +840,24 @@ class Pet:
         data, w, h, dx, dy = shown
         show_layered(self.win.hwnd, data, w, h, round(self.x if x is None else x) + dx,
                      round(self.y if y is None else y) + dy)
+
+    def draw_dust(self, img, x, y):
+        """The picture with TDL's landing dust: soft grey-brown puffs flying out both ways from his feet."""
+        from PIL import Image, ImageDraw
+        px = self.px
+        pad = px * 2  # room for the dust to spread sideways
+        im = Image.new('RGBA', (px + 2 * pad, px), (0, 0, 0, 0))
+        im.alpha_composite(img, (pad + (px - img.width) // 2, px - img.height))
+        layer = Image.new('RGBA', im.size, (0, 0, 0, 0))
+        d = ImageDraw.Draw(layer)
+        fx, fy = pad + px / 2, px - 3 * px / 128  # his feet
+        for dx, dy, _, _, life, size in self.dust:
+            a = int(170 * min(1, life / 12))
+            cx, cy = fx + dx, fy + dy - size / 2
+            d.ellipse((cx - size, cy - size * 0.7, cx + size, cy + size * 0.7), fill=(205, 195, 175, a))
+        im.alpha_composite(layer)
+        show_layered(self.win.hwnd, im.convert('RGBa').tobytes('raw', 'BGRa'), im.width, im.height,
+                     round(self.x if x is None else x) - pad, round(self.y if y is None else y))
 
     def draw_staff(self, img, x, y):
         """Yellow riding his staff down: his fall picture as drawn, with sparkles streaming off the gem."""
@@ -924,6 +958,16 @@ def with_laptop(img, tap=False):
         fig.alpha_composite(hand, (box[0], box[1] + round(2 * u)))
     out.alpha_composite(fig)
     return out
+
+
+def unstretched(img, app):
+    """TDL's fall picture, drawn stretched tall (152 px for a 128 px character): back to his width, 75% height."""
+    from PIL import Image
+    cache = app.__dict__.setdefault('unstretched', {})
+    if cache.get(id(img), (None,))[0] is not img:  # keyed by the picture itself (ids get reused)
+        r = max(1.0, img.height / img.width)  # it was fitted by its height, so it came out narrow
+        cache[id(img)] = img, img.resize((round(img.width * r), round(img.height * r * 0.75)), Image.LANCZOS)
+    return cache[id(img)][1]
 
 
 def squashed(img, s, app):
