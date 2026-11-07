@@ -393,6 +393,7 @@ class Pet:
         self.spin = self.spin_v = 0  # degrees, degrees per step: tumble in the air after a throw
         self.th = self.om = 0.0  # radians, radians/s: swing about the held hand or foot (0: hanging straight down)
         self.lean, self.pose = 0.0, None  # held by the hand: the shown picture's own body angle; (picture, when)
+        self.tilt, self.sparks = 0, []  # Yellow's staff fall: pole tipped down (degrees); [x, y, vx, vy, life]
         self.ledge = None  # the window this pet stands on, as (hwnd, left, top, right)
         self.dir = random.choice((-1, 1))
         self.frame = 0       # physics steps (30 a second): drives sprite animation and timers
@@ -591,13 +592,18 @@ class Pet:
                 L, R, floor = w[1], w[3], w[2] - px
         if s == 'fall':
             bottom = self.y + px
-            # shortcut: Yellow's fall pictures ride a staff, by name. A plain drop on it glides down, easing off
-            # near the floor (top speed 12 px a step, 2 at the floor), and always lands softly
+            # shortcut: Yellow's fall pictures ride a staff, by name. Near the floor he tips the pole end down
+            # (0-25 degrees in 5 degree steps, over the last 300 px), falls a touch slower, and always lands softly
             staff = self.app.pack and not self.leap and self.app.settings['character'] == 'Yellow'
-            if staff and self.vy > 0:
-                self.vy = min(self.vy + GRAVITY * 0.4, 12, 2 + max(0, floor - self.y) * 0.035)
+            self.tilt = round(25 * max(0.0, 1 - (floor - self.y) / 300) / 5) * 5 if staff else 0
+            if not self.leap and self.vy >= 0:  # a plain drop falls at a steady 8 px a step; throws keep gravity
+                self.vy = min(self.vy + GRAVITY, 8 * (1 - 0.15 * self.tilt / 25))
             else:
                 self.vy += GRAVITY
+            if staff:  # sparkles fly off the gem, left behind as he comes down
+                self.sparks = [[x + vx, y + vy, vx, vy, life - 1] for x, y, vx, vy, life in self.sparks if life > 1]
+                if random.random() < 0.7:  # x is away from the rider (the side is set when drawn), y is up
+                    self.sparks.append([0.0, 0.0, random.uniform(0.2, 1.6), -random.uniform(1.0, 2.6), 16])
             self.x += self.vx
             self.y += self.vy
             if not L <= self.x <= R - px:  # hit a screen edge: bounce off it, the knock flips the spin
@@ -623,6 +629,7 @@ class Pet:
                 self.y = floor
                 # fell from high up (300+ px), or came down sideways; never off the staff
                 hard = not staff and (self.vy > 30 or abs(self.spin) > 50)
+                self.sparks, self.tilt = [], 0
                 self.vx, self.vy, self.spin, self.spin_v = 0, 0, 0, 0
                 self.land(hard)
         elif s == 'land':
@@ -758,6 +765,8 @@ class Pet:
         if not self.win.isVisible():
             return
         img = self.picture()
+        if self.state == 'fall' and self.app.pack and not self.leap and self.app.settings['character'] == 'Yellow':
+            return self.draw_staff(img, x, y)
         top = self.state == 'ceiling'  # hanging: picture hugs the top edge, not the floor
         hang = self.state == 'hang'
         held = self.state in ('drag', 'hang')
@@ -798,6 +807,55 @@ class Pet:
         data, w, h, dx, dy = shown
         show_layered(self.win.hwnd, data, w, h, round(self.x if x is None else x) + dx,
                      round(self.y if y is None else y) + dy)
+
+    def draw_staff(self, img, x, y):
+        """Yellow riding his staff down: the picture tipped by self.tilt (pole end down), sparkles off the gem."""
+        from PIL import Image, ImageDraw
+        px = self.px
+        pad = px // 2  # room for sparkles above and beside him
+        cache = self.app.__dict__.setdefault('staffs', {})
+        key = (id(img), self.tilt, px)
+        if cache.get(key, (None,))[0] is not img:  # keyed by the picture itself (ids get reused)
+            gem, tip = staff_ends(img)
+            sign = 1 if tip[0] > img.width / 2 else -1  # pole end on the right: tip it down = turn clockwise
+            ang = -sign * self.tilt
+            ox, oy = pad + (px - img.width) // 2, pad + px - img.height
+            base = Image.new('RGBA', (px + 2 * pad,) * 2, (0, 0, 0, 0))
+            base.alpha_composite(img, (ox, oy))
+            c = (px + 2 * pad) / 2
+            base = base.rotate(ang, Image.BICUBIC, center=(c, c))
+            a, dx, dy = math.radians(ang), gem[0] + ox - c, gem[1] + oy - c
+            g = (c + dx * math.cos(a) + dy * math.sin(a), c - dx * math.sin(a) + dy * math.cos(a))
+            cache[key] = img, base, g, (1 if gem[0] > tip[0] else -1)
+        _, base, (gx, gy), side = cache[key]
+        im = base.copy()
+        d = ImageDraw.Draw(im)
+        k = px / 128
+        for sx, sy, _, _, life in self.sparks:  # little four-point stars, shrinking and fading
+            cx, cy, r = gx + side * sx * k, gy + sy * k, (1 + life / 6) * k
+            col = (255, 255, 255, int(255 * min(1, life / 10)))
+            d.line((cx - r, cy, cx + r, cy), fill=col, width=max(1, round(k)))
+            d.line((cx, cy - r, cx, cy + r), fill=col, width=max(1, round(k)))
+        show_layered(self.win.hwnd, im.convert('RGBa').tobytes('raw', 'BGRa'), im.width, im.height,
+                     round(self.x if x is None else x) - pad, round(self.y if y is None else y) - pad)
+
+
+def staff_ends(img):
+    """(gem, pole tip) of a staff picture: the staff is the solid pixels that are neither the yellow body nor
+    white sparkles; its two far ends are the gem (the bulky end) and the bare pole tip."""
+    raw, w = img.tobytes(), img.width
+    pts = []
+    for i in range(0, len(raw), 4):
+        r, g, b, al = raw[i], raw[i + 1], raw[i + 2], raw[i + 3]
+        # coloured (not the grey/white sparkles) and not the yellow body
+        if al > 200 and not (r > 200 and g > 140 and b < 90) and max(r, g, b) - min(r, g, b) > 40:
+            pts.append((i // 4 % w, i // 4 // w))
+    if len(pts) < 10:  # no staff found: middle and bottom
+        return (w / 2, img.height / 2), (w / 2, img.height)
+    ends = [min(pts), max(pts)]  # leftmost and rightmost staff pixels
+    bulk = [sum(1 for p in pts if math.dist(p, e) < 12) for e in ends]
+    gem, tip = (ends[0], ends[1]) if bulk[0] > bulk[1] else (ends[1], ends[0])
+    return gem, tip
 
 
 def pet_px(settings):
