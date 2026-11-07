@@ -591,7 +591,13 @@ class Pet:
                 L, R, floor = w[1], w[3], w[2] - px
         if s == 'fall':
             bottom = self.y + px
-            self.vy += GRAVITY
+            # shortcut: Yellow's fall pictures ride a staff, by name. A plain drop on it glides down, easing off
+            # near the floor (top speed 12 px a step, 2 at the floor), and always lands softly
+            staff = self.app.pack and not self.leap and self.app.settings['character'] == 'Yellow'
+            if staff and self.vy > 0:
+                self.vy = min(self.vy + GRAVITY * 0.4, 12, 2 + max(0, floor - self.y) * 0.035)
+            else:
+                self.vy += GRAVITY
             self.x += self.vx
             self.y += self.vy
             if not L <= self.x <= R - px:  # hit a screen edge: bounce off it, the knock flips the spin
@@ -615,7 +621,8 @@ class Pet:
                     self.spin = self.spin_v = 0
             if self.y >= floor:
                 self.y = floor
-                hard = self.vy > 30 or abs(self.spin) > 50  # fell from high up (300+ px), or came down sideways
+                # fell from high up (300+ px), or came down sideways; never off the staff
+                hard = not staff and (self.vy > 30 or abs(self.spin) > 50)
                 self.vx, self.vy, self.spin, self.spin_v = 0, 0, 0, 0
                 self.land(hard)
         elif s == 'land':
