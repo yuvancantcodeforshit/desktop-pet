@@ -393,7 +393,7 @@ class Pet:
         self.spin = self.spin_v = 0  # degrees, degrees per step: tumble in the air after a throw
         self.th = self.om = 0.0  # radians, radians/s: swing about the held hand or foot (0: hanging straight down)
         self.lean, self.pose = 0.0, None  # held by the hand: the shown picture's own body angle; (picture, when)
-        self.tilt, self.sparks = 0, []  # Yellow's staff fall: pole tipped down (degrees); [x, y, vx, vy, life]
+        self.tilt, self.sparks = 0, []  # Yellow's staff fall: sixths of the turn to gem-down; [x, y, vx, vy, life]
         self.ledge = None  # the window this pet stands on, as (hwnd, left, top, right)
         self.dir = random.choice((-1, 1))
         self.frame = 0       # physics steps (30 a second): drives sprite animation and timers
@@ -592,12 +592,13 @@ class Pet:
                 L, R, floor = w[1], w[3], w[2] - px
         if s == 'fall':
             bottom = self.y + px
-            # shortcut: Yellow's fall pictures ride a staff, by name. Near the floor he tips the pole end down
-            # (0-25 degrees in 5 degree steps, over the last 300 px), falls a touch slower, and always lands softly
+            # shortcut: Yellow's fall pictures ride a staff, by name. From 450 px above the floor the staff turns
+            # gem-down like a rocket (tilt: 0-6 sixths of the turn, done 220 px up); then he hangs off it by one
+            # hand. Turned, he falls up to 15% slower; he always lands softly
             staff = self.app.pack and not self.leap and self.app.settings['character'] == 'Yellow'
-            self.tilt = round(25 * max(0.0, 1 - (floor - self.y) / 300) / 5) * 5 if staff else 0
-            if not self.leap and self.vy >= 0:  # a plain drop falls at a steady 8 px a step; throws keep gravity
-                self.vy = min(self.vy + GRAVITY, 8 * (1 - 0.15 * self.tilt / 25))
+            self.tilt = round(6 * max(0.0, min(1.0, (450 - (floor - self.y)) / 230))) if staff else 0
+            if not self.leap and self.vy >= 0:  # a plain drop falls at a steady 10 px a step; throws keep gravity
+                self.vy = min(self.vy + GRAVITY, 10 * (1 - 0.15 * self.tilt / 6))
             else:
                 self.vy += GRAVITY
             if staff:  # sparkles fly off the gem, left behind as he comes down
@@ -809,24 +810,45 @@ class Pet:
                      round(self.y if y is None else y) + dy)
 
     def draw_staff(self, img, x, y):
-        """Yellow riding his staff down: the picture tipped by self.tilt (pole end down), sparkles off the gem."""
+        """Yellow riding his staff down. self.tilt (sixths) turns the picture until the gem points straight
+        down like a rocket; fully turned, he hangs off the upright staff by one hand (his swing pose, like a
+        pirate on the rigging). Sparkles stream off the gem."""
         from PIL import Image, ImageDraw
         px = self.px
         pad = px // 2  # room for sparkles above and beside him
         cache = self.app.__dict__.setdefault('staffs', {})
         key = (id(img), self.tilt, px)
         if cache.get(key, (None,))[0] is not img:  # keyed by the picture itself (ids get reused)
-            gem, tip = staff_ends(img)
-            sign = 1 if tip[0] > img.width / 2 else -1  # pole end on the right: tip it down = turn clockwise
-            ang = -sign * self.tilt
-            ox, oy = pad + (px - img.width) // 2, pad + px - img.height
-            base = Image.new('RGBA', (px + 2 * pad,) * 2, (0, 0, 0, 0))
-            base.alpha_composite(img, (ox, oy))
-            c = (px + 2 * pad) / 2
-            base = base.rotate(ang, Image.BICUBIC, center=(c, c))
-            a, dx, dy = math.radians(ang), gem[0] + ox - c, gem[1] + oy - c
-            g = (c + dx * math.cos(a) + dy * math.sin(a), c - dx * math.sin(a) + dy * math.cos(a))
-            cache[key] = img, base, g, (1 if gem[0] > tip[0] else -1)
+            gem, tip, pole, gem_img, length = staff_parts(img)
+            # the turn (screen degrees, clockwise +) that points tip->gem straight down
+            need = (90 - math.degrees(math.atan2(gem[1] - tip[1], gem[0] - tip[0])) + 180) % 360 - 180
+            W = px + 2 * pad
+            base = Image.new('RGBA', (W, W), (0, 0, 0, 0))
+            if self.tilt < 6:  # riding, part way round
+                ang = -need * self.tilt / 6  # PIL turns counter-clockwise
+                ox, oy = pad + (px - img.width) // 2, pad + px - img.height
+                base.alpha_composite(img, (ox, oy))
+                c = W / 2
+                base = base.rotate(ang, Image.BICUBIC, center=(c, c))
+                a, dx, dy = math.radians(ang), gem[0] + ox - c, gem[1] + oy - c
+                g = (c + dx * math.cos(a) + dy * math.sin(a), c - dx * math.sin(a) + dy * math.cos(a))
+            else:  # upright staff, gem at the floor, and him hanging off it by one hand
+                d = ImageDraw.Draw(base)
+                cx, bottom = W / 2, pad + px - gem_img.height / 2
+                top = bottom - length
+                d.line((cx, top, cx, bottom), fill=pole, width=max(2, round(4 * px / 128)))
+                gi = gem_img.rotate(-need, Image.BICUBIC)
+                base.alpha_composite(gi, (round(cx - gi.width / 2), round(bottom - gi.height / 2)))
+                frames = self.app.pack[0]
+                # his swing pose, facing away from the side he rode on, so he leans out from the staff
+                side = 1 if self.dir < 0 else 0
+                poses = list({id(p): p for p in frames.get('ceiling', frames['drag'])[1 - side]}.values())
+                pose = poses[-1]
+                hx, hy, _ = self.grip(pose)  # the hand tip, on the px square the pose is centred in
+                ox, oy = (px - pose.width) // 2, px - pose.height
+                base.alpha_composite(pose, (round(cx - hx + ox), round(top + length * 0.15 - hy + oy)))
+                g = (cx, bottom)
+            cache[key] = img, base, g, (1 if gem[0] > tip[0] else -1) if self.tilt < 6 else 1
         _, base, (gx, gy), side = cache[key]
         im = base.copy()
         d = ImageDraw.Draw(im)
@@ -840,22 +862,34 @@ class Pet:
                      round(self.x if x is None else x) - pad, round(self.y if y is None else y) - pad)
 
 
-def staff_ends(img):
-    """(gem, pole tip) of a staff picture: the staff is the solid pixels that are neither the yellow body nor
-    white sparkles; its two far ends are the gem (the bulky end) and the bare pole tip."""
+def staff_parts(img):
+    """The staff in a picture: (gem centre, pole tip, pole colour, gem cut out, gem-to-tip length). The staff is
+    the solid pixels that are neither the yellow body nor grey/white sparkles; of its two far ends the bulky
+    one is the gem (the command block) and the other the bare pole tip."""
+    from collections import Counter
+    from PIL import Image
     raw, w = img.tobytes(), img.width
     pts = []
     for i in range(0, len(raw), 4):
         r, g, b, al = raw[i], raw[i + 1], raw[i + 2], raw[i + 3]
-        # coloured (not the grey/white sparkles) and not the yellow body
         if al > 200 and not (r > 200 and g > 140 and b < 90) and max(r, g, b) - min(r, g, b) > 40:
-            pts.append((i // 4 % w, i // 4 // w))
-    if len(pts) < 10:  # no staff found: middle and bottom
-        return (w / 2, img.height / 2), (w / 2, img.height)
-    ends = [min(pts), max(pts)]  # leftmost and rightmost staff pixels
-    bulk = [sum(1 for p in pts if math.dist(p, e) < 12) for e in ends]
+            pts.append((i // 4 % w, i // 4 // w, (r, g, b, 255)))
+    if len(pts) < 10:  # no staff found
+        return (w / 2, img.height / 2), (w / 2, img.height), (160, 80, 110, 255), Image.new('RGBA', (1, 1)), 0
+    k = w / 128  # sizes below are for a 128 px wide picture
+    xy = [p[:2] for p in pts]
+    ends = [min(xy), max(xy)]  # leftmost and rightmost staff pixels
+    bulk = [sum(1 for p in xy if math.dist(p, e) < 12 * k) for e in ends]
     gem, tip = (ends[0], ends[1]) if bulk[0] > bulk[1] else (ends[1], ends[0])
-    return gem, tip
+    near = [p for p in pts if math.dist(p[:2], gem) < 22 * k]
+    gx, gy = sum(p[0] for p in near) / len(near), sum(p[1] for p in near) / len(near)
+    pole = Counter(p[2] for p in pts if math.dist(p[:2], gem) > 30 * k).most_common(1)
+    r = int(16 * k)
+    cut = Image.new('RGBA', (2 * r, 2 * r), (0, 0, 0, 0))
+    for x, y, c in pts:
+        if abs(x - gx) < r and abs(y - gy) < r:
+            cut.putpixel((int(x - gx + r), int(y - gy + r)), c)
+    return (gx, gy), tip, pole[0][0] if pole else (160, 80, 110, 255), cut, math.dist((gx, gy), tip)
 
 
 def pet_px(settings):
