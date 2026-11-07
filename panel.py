@@ -7,7 +7,7 @@ import ctypes, os, threading, webbrowser
 from PySide6.QtCore import QEasingCurve, QPropertyAnimation, QRectF, QSize, Qt, QTimer, QVariantAnimation
 from PySide6.QtGui import QColor, QCursor, QFont, QFontDatabase, QGuiApplication, QIcon, QPainter, QPixmap
 from PySide6.QtWidgets import (QAbstractButton, QCheckBox, QColorDialog, QComboBox, QFileDialog, QFrame, QGridLayout,
-                               QHBoxLayout, QLabel, QMenu, QMessageBox, QPushButton, QScrollArea, QSlider,
+                               QGraphicsOpacityEffect, QHBoxLayout, QLabel, QMenu, QMessageBox, QPushButton, QScrollArea, QSlider,
                                QStackedWidget, QVBoxLayout, QWidget, QWidgetAction)
 
 import packs
@@ -111,7 +111,24 @@ class Clickable(QFrame):
         self.setCursor(Qt.PointingHandCursor)
         self.setAttribute(Qt.WA_Hover)
 
+    def press(self, down):
+        """Pressed look the instant the button goes down (dimmed), gone when it comes up or the mouse leaves."""
+        if down and not self.graphicsEffect():
+            e = QGraphicsOpacityEffect(self)
+            e.setOpacity(0.6)
+            self.setGraphicsEffect(e)
+        elif not down and self.graphicsEffect():
+            self.setGraphicsEffect(None)
+
+    def mousePressEvent(self, e):
+        if e.button() == Qt.LeftButton:
+            self.press(True)
+
+    def mouseMoveEvent(self, e):  # drag off cancels, drag back on re-arms
+        self.press(bool(e.buttons() & Qt.LeftButton) and self.rect().contains(e.position().toPoint()))
+
     def mouseReleaseEvent(self, e):
+        self.press(False)
         if e.button() == Qt.LeftButton and self.rect().contains(e.position().toPoint()):
             self.on_click()
 
@@ -126,6 +143,7 @@ class SettingsWindow(QWidget):
         self.thumbs = {}        # (pack name, px) -> loaded frames, kept for the window's life
         self.frame = 0
         self.drag_from = None
+        self.fades = {}         # running child fades: slot -> (animation, clean-up)
         self.setWindowTitle('Desktop Pet')
         self.setAcceptDrops(True)
         self.setFixedWidth(W)
@@ -161,6 +179,8 @@ class SettingsWindow(QWidget):
 
     def fade(self, to, then=None):
         """Ease the window's opacity to `to` (~130 ms, ease-out); instant if Windows animations are off."""
+        if getattr(self, 'fader', None):
+            self.fader.stop()  # interrupted: the new fade starts from the current opacity; the old `then` never runs
         a = self.fader = QPropertyAnimation(self, b'windowOpacity', self)
         a.setDuration(130 if animations_on() else 0)
         a.setEasingCurve(QEasingCurve.OutCubic)
@@ -169,12 +189,57 @@ class SettingsWindow(QWidget):
             a.finished.connect(then)
         a.start()
 
+    def fade_child(self, slot, w, to, ms, done):
+        """Ease a child widget's opacity from 1-`to` to `to` (ease-out), then run `done`.
+        A newer fade in the same slot finishes the old one at once, so nothing is left half-faded."""
+        old = self.fades.pop(slot, None)
+        if old:
+            old[0].stop()
+            old[1]()
+        e = QGraphicsOpacityEffect(w)
+        e.setOpacity(1 - to)
+        w.setGraphicsEffect(e)
+        a = QPropertyAnimation(e, b'opacity', self)
+        a.setDuration(ms)
+        a.setEasingCurve(QEasingCurve.OutCubic)
+        a.setEndValue(float(to))
+
+        def finish():
+            self.fades.pop(slot, None)
+            try:
+                done()
+            except RuntimeError:  # the widget was rebuilt away meanwhile
+                pass
+        a.finished.connect(finish)
+        self.fades[slot] = (a, finish)
+        a.start()
+
+    def fade_in(self, page):
+        """Tab switch: the new page fades in (~120 ms); the effect is dropped after so scrolling stays cheap."""
+        self.fade_child('page', page, 1, 120, lambda: page.setGraphicsEffect(None))
+
+    def crossfade(self, change):
+        """Theme / accent / font: snapshot the old look, apply `change`, then fade the snapshot away (~180 ms).
+        Mouse goes straight through the snapshot, so the new look is usable at once."""
+        if not (self.isVisible() and animations_on()):
+            return change()
+        shot = QLabel(self)
+        shot.setPixmap(self.grab())  # includes any snapshot still fading: starts from what is on screen
+        shot.setAttribute(Qt.WA_TransparentForMouseEvents)
+        shot.setGeometry(self.rect())
+        change()
+        shot.show()
+        shot.raise_()
+        self.fade_child('look', shot, 0, 180, shot.deleteLater)
+
     def show_tab(self, tab):
         """Open on a tab (tray / right-click / second launch): bring the window back the way it left."""
         self.pick(tab)
-        if not self.isVisible() or self.isMinimized() or self.windowOpacity() < 1:
+        if not self.isVisible() or self.isMinimized():
             self.setWindowOpacity(0)
             self.showNormal()
+            self.fade(1)
+        elif self.windowOpacity() < 1:  # caught mid-fade: turn around from where it is
             self.fade(1)
         self.raise_()
         self.activateWindow()
@@ -261,13 +326,20 @@ class SettingsWindow(QWidget):
             QPushButton:pressed {{ background: {shade(c['hover'], 0.82 if light else 1.3)}; }}
             #primary {{ background: {c['acc']}; color: {c['on_acc']}; font-weight: 600; }}
             #primary:hover {{ background: {shade(c['acc'], 0.9)}; }}
+            #primary:pressed {{ background: {shade(c['acc'], 0.8)}; }}
             #danger {{ background: {DANGER}; color: #ffffff; font-weight: 600; }}
+            #danger:hover {{ background: {shade(DANGER, 0.9)}; }}
+            #danger:pressed {{ background: {shade(DANGER, 0.8)}; }}
             #glyph {{ font-family: "{ICONS}"; font-size: 12px; padding: 0; min-width: 32px; min-height: 28px; }}
             #chrome {{ font-family: "{ICONS}"; font-size: 10px; background: transparent; border-radius: 15px;
                        min-width: 30px; max-width: 30px; min-height: 30px; max-height: 30px; padding: 0; }}
             #chrome:hover {{ background: {c['btn_hover']}; }}
+            #chrome:pressed {{ background: {shade(c['btn_hover'], 0.85 if light else 1.2)}; }}
             #close:hover {{ background: {CLOSE_RED}; color: #ffffff; }}
+            #close:pressed {{ background: {shade(CLOSE_RED, 0.85)}; color: #ffffff; }}
             #tabbar {{ background: {c['card']}; border-top: 1px solid {c['border']}; }}
+            #tab {{ border-radius: 8px; }}
+            #tab:hover {{ background: {c['hover']}; }}
             #tab QLabel {{ background: transparent; }}
             #grip {{ background: {c['card']}; }}
             QSlider::groove:horizontal {{ height: 4px; background: {c['border']}; border-radius: 2px; }}
@@ -326,11 +398,20 @@ class SettingsWindow(QWidget):
             area.setWidget(page)
             self.stack.addWidget(area)
             self.pages[key] = area
-        self.pick(self.tab)
+        for lab in self.stack.findChildren(QLabel):  # QSS has no letter-spacing: tighten big headings here
+            if lab.objectName() in ('title', 'section'):
+                lab.ensurePolished()
+                f = lab.font()
+                f.setLetterSpacing(QFont.AbsoluteSpacing, -0.4 if lab.objectName() == 'title' else -0.15)
+                lab.setFont(f)
+        self.pick(self.tab, fade=False)
 
-    def pick(self, tab):
+    def pick(self, tab, fade=True):
         self.tab = tab
-        self.stack.setCurrentWidget(self.pages[tab])
+        page = self.pages[tab]
+        if fade and page is not self.stack.currentWidget() and self.isVisible() and animations_on():
+            self.fade_in(page)
+        self.stack.setCurrentWidget(page)
         c = self.c
         for key, (icon, name, bar) in self.tab_parts.items():
             on = key == tab
@@ -470,7 +551,7 @@ class SettingsWindow(QWidget):
         self.app.settings[key] = value
         self.app.apply()
         if key in RESTYLE:
-            self.restyle()
+            self.crossfade(self.restyle)
         elif key in REFRESH:
             self.build_pages()
         elif key == 'pets':
