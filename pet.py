@@ -394,6 +394,7 @@ class Pet:
         self.th = self.om = 0.0  # radians, radians/s: swing about the held hand or foot (0: hanging straight down)
         self.lean, self.pose = 0.0, None  # held by the hand: the shown picture's own body angle; (picture, when)
         self.sparks = []  # Yellow's staff fall: sparkles off the gem, [x, y, vx, vy, life]
+        self.rock = 0  # degrees: rocking on its back after landing upside down
         self.ledge = None  # the window this pet stands on, as (hwnd, left, top, right)
         self.dir = random.choice((-1, 1))
         self.frame = 0       # physics steps (30 a second): drives sprite animation and timers
@@ -550,8 +551,11 @@ class Pet:
         # let go: keeps its swing as spin, and a throw rolls it the way it was thrown (right: clockwise)
         self.spin = math.degrees(self.th) + (180 if self.state == 'hang' else 0)
         self.spin_v = max(-15, min(15, math.degrees(self.om) * STEP - self.vx * (0.6 if self.state == 'hang' else 0.3)))
+        thrown = math.hypot(self.vx, self.vy) > 4
+        if not thrown:  # let go without a throw: a plain, upright drop
+            self.spin = self.spin_v = 0
         self.update_area()  # dropped on another monitor: live there
-        self.set('fall', leap=math.hypot(self.vx, self.vy) > 4)  # let go without a throw: a plain drop
+        self.set('fall', leap=thrown)
 
     def update_area(self):
         """Live on the monitor under the pet; if Settings turned that monitor off, hop to an allowed one."""
@@ -612,24 +616,21 @@ class Pet:
             if (w and not self.ledge and self.vy > 0 and w[1] <= cx <= w[3] and bottom <= w[2] <= self.y + px
                     and w[2] - px > T):  # dropping past a window's top edge: land on it
                 self.ledge, floor = w, w[2] - px
-            if self.spin or self.spin_v:  # tumbling: air drag slows the spin, then it rights itself before landing
+            if self.spin or self.spin_v:  # tumbling the way it was thrown: full turns, only air drag slows it
                 self.spin = (self.spin + self.spin_v + 180) % 360 - 180
-                self.spin_v *= 0.98
-                err = -self.spin  # degrees to upright
-                near = floor - self.y < px * 2
-                # turning towards upright, or nearly still: pull upright. Turning away: let it roll on over the top,
-                # so it never swings back against the way it was thrown
-                if (near or abs(self.spin_v) < 6) and (err * self.spin_v >= 0 or abs(self.spin_v) < 2):
-                    self.spin_v = (self.spin_v + err * (0.06 if near else 0.03)) * 0.85
-                if abs(self.spin) < 2 and abs(self.spin_v) < 1:
-                    self.spin = self.spin_v = 0
+                self.spin_v *= 0.985
             if self.y >= floor:
                 self.y = floor
-                # fell from high up (300+ px), or came down sideways; never off the staff
+                # how it meets the floor: upside down = on its back; sideways or from high up (300+ px) = a crash;
+                # never off the staff
+                back = abs(self.spin) > 120 and self.app.pack and 'lie' in self.app.pack[0]
                 hard = not staff and (self.vy > 30 or abs(self.spin) > 50)
                 self.sparks = []
                 self.vx, self.vy, self.spin, self.spin_v = 0, 0, 0, 0
-                self.land(hard)
+                if back:
+                    self.set('backland', 22)
+                else:
+                    self.land(hard)
         elif s == 'land':
             if self.timer <= 0:
                 self.set('idle')
@@ -641,6 +642,8 @@ class Pet:
                     self.y, self.vy = floor, 0
             if self.timer <= 0:
                 self.land(full=True)
+        elif s == 'backland' and self.timer <= 0:  # rolled over onto its front (see picture): crawls up
+            self.land(full=True)
         elif s in ('walk', 'run'):
             self.x += (2 if s == 'walk' else 4) * speed * self.dir
             if s == 'run' and random.random() < 0.004 and 'lie' not in self.app.settings['off']:  # tripped over its own feet
@@ -740,15 +743,28 @@ class Pet:
                 s = 'ceiling'
             if s == 'crash' and 'land' in frames:  # crashed: face down, the landing animation's first picture
                 return frames['land'][1 if d < 0 else 0][0]
+            if s == 'backland':  # landed on its back: rocks a moment, then rolls over onto its front
+                k, side = f - self.since, 1 if d < 0 else 0
+                lay = frames['lie'][side][0]
+                front = frames['land'][side][0] if 'land' in frames else lay
+                self.rock = round(5 * math.sin(k * 0.9)) if k < 15 else 0
+                if k < 15:
+                    return lay
+                # the roll: the back flattens away and the front grows back, like a card turned over
+                roll = ((lay, 0.6), (lay, 0.3), (front, 0.3), (front, 0.6), (front, 0.85))
+                return squashed(*roll[min(len(roll) - 1, (k - 15) * len(roll) // 7)], self.app)
             pair = next((frames[k] for k in (s,) + STAND_INS.get(s, ()) if k in frames), frames['idle'])
             seq = pair[1] if d < 0 else pair[0]
             i = int((f - self.since) * fps / 30)
             img = seq[min(i, len(seq) - 1) if s in ONCE else i % len(seq)]
             if s == 'sit' and self.app.settings['character'] == 'Yellow':  # shortcut: Yellow's laptop, by name
+                # typing: his front hand taps down in an uneven rhythm, the screen light flickers with it
+                tap = int((f // 3 * 2654435761) >> 7) % 3 != 0 and f // 3 % 2 == 0
                 cache = self.app.__dict__.setdefault('laptops', {})
-                if cache.get(id(img), (None,))[0] is not img:  # keyed by the picture itself (ids get reused)
-                    cache[id(img)] = img, with_laptop(img)
-                img = cache[id(img)][1]
+                key = (id(img), tap)
+                if cache.get(key, (None,))[0] is not img:  # keyed by the picture itself (ids get reused)
+                    cache[key] = img, with_laptop(img, tap)
+                img = cache[key][1]
             return img
         step = 0
         if s in ('walk', 'climb', 'ceiling', 'run', 'chase', 'dance', 'hang'):
@@ -770,7 +786,8 @@ class Pet:
         held = self.state in ('drag', 'hang')
         # turn: swing about the held hand or foot, or tumble in the air about the middle
         turn = (round(math.degrees(self.th - self.lean) / 2) * 2 if held else
-                round(self.spin / 4) * 4 % 360 if self.state == 'fall' else 0)
+                round(self.spin / 4) * 4 % 360 if self.state == 'fall' else
+                self.rock if self.state == 'backland' else 0)  # rocking on its back, about its bottom middle
         # held by the foot: arms and head trail behind the swing, bending the picture (px, in 2 px steps)
         bend = round(max(-0.2, min(0.2, -self.om * 0.06)) * self.px / 2) * 2 if hang else 0
         key = (id(img), top, hang, turn, bend, (round(self.hx), round(self.hy)) if held else None)
@@ -794,7 +811,8 @@ class Pet:
                         ((0, int(ys[k]), W, int(ys[k + 1])),
                          (-sh[k], ys[k], -sh[k + 1], ys[k + 1], W - sh[k + 1], ys[k + 1], W - sh[k], ys[k]))
                         for k in range(n)], Image.BICUBIC)
-                big = big.rotate(turn, Image.BICUBIC, center=(self.hx + px, self.hy + px) if held else None)
+                big = big.rotate(turn, Image.BICUBIC, center=(self.hx + px, self.hy + px) if held else
+                                 (px * 1.5, px * 2 - 2) if self.state == 'backland' else None)
                 l, t, r, b = big.getbbox() or (px, px, px + 1, px + 1)
                 canvas, dx, dy = big.crop((l, t, r, b)), l - px, t - px
             # premultiplied, as Windows wants
@@ -817,7 +835,7 @@ class Pet:
             gem, tip = staff_ends(img)
             ox, oy = pad + (px - img.width) // 2, pad + px - img.height
             base = Image.new('RGBA', (px + 2 * pad,) * 2, (0, 0, 0, 0))
-            base.alpha_composite(img, (ox, oy))
+            base.alpha_composite(without_sparkles(img, gem), (ox, oy))  # only the moving sparkles
             cache[key] = img, base, (gem[0] + ox, gem[1] + oy), (1 if gem[0] > tip[0] else -1)
         _, base, (gx, gy), side = cache[key]
         im = base.copy()
@@ -856,9 +874,10 @@ def pet_px(settings):
     return int(SIZE * settings['size'] * DPI_SCALE)
 
 
-def with_laptop(img):
+def with_laptop(img, tap=False):
     """The sitting picture with a little silver laptop on the floor in front of the knees, lid open towards
-    the face (Yellow's laptop). Which way it faces comes from the picture: the knees stick out on that side."""
+    the face (Yellow's laptop). Which way it faces comes from the picture: the knees stick out on that side.
+    tap: his front hand (the tip that sticks out past the knees) pressed down a little, the screen lit brighter."""
     from PIL import Image, ImageDraw
     a = img.getchannel('A')
     l, t, r, b = a.getbbox() or (0, 0, img.width, img.height)
@@ -891,10 +910,44 @@ def with_laptop(img):
     poly(lid, (206, 209, 214, 255), (128, 131, 138, 255))
     sx, sy = sum(p[0] for p in lid) / 4, sum(p[1] for p in lid) / 4
     d.ellipse((*at(sx - 2.2 * u, sy - 2.2 * u), *at(sx + 2.2 * u, sy + 2.2 * u)), fill=(255, 255, 255, 255))
-    d.line([at(*lid[1]), at(*lid[2])], fill=(170, 215, 255, 255), width=max(1, int(u * k)))  # screen light, his side
+    light = (215, 240, 255, 255) if tap else (150, 195, 240, 255)  # screen light on his side, flickering
+    d.line([at(*lid[1]), at(*lid[2])], fill=light, width=max(1, int(u * k * (1.4 if tap else 1))))
     out = big.resize(img.size, Image.LANCZOS)
-    out.alpha_composite(img)
+    fig = img
+    if tap:  # the hand's strip moves down 2 units
+        fig = img.copy()
+        xa, xb = (l, l + 5 * u) if face < 0 else (r - 5 * u, r)
+        box = (int(xa), int(t + 0.2 * h), int(xb) + 1, int(t + 0.7 * h))
+        hand = img.crop(box)
+        fig.paste((0, 0, 0, 0), box)
+        fig.alpha_composite(hand, (box[0], box[1] + round(2 * u)))
+    out.alpha_composite(fig)
     return out
+
+
+def squashed(img, s, app):
+    """img flattened to s of its height, standing on the same bottom edge (for turning over like a card)."""
+    from PIL import Image
+    cache = app.__dict__.setdefault('squashed', {})
+    key = (id(img), s)
+    if cache.get(key, (None,))[0] is not img:  # keyed by the picture itself (ids get reused)
+        out = Image.new('RGBA', img.size, (0, 0, 0, 0))
+        flat = img.resize((img.width, max(1, round(img.height * s))), Image.LANCZOS)
+        out.alpha_composite(flat, (0, img.height - flat.height))
+        cache[key] = img, out
+    return cache[key][1]
+
+
+def without_sparkles(img, gem):
+    """The staff picture with its drawn (still) sparkles cleared: grey/white pixels away from the gem
+    (whose own screen is light grey)."""
+    from PIL import Image
+    raw, w, k = bytearray(img.tobytes()), img.width, img.width / 128
+    for i in range(0, len(raw), 4):
+        r, g, b = raw[i], raw[i + 1], raw[i + 2]
+        if raw[i + 3] and min(r, g, b) > 120 and max(r, g, b) - min(r, g, b) < 40                 and math.dist((i // 4 % w, i // 4 // w), gem) > 18 * k:
+            raw[i + 3] = 0
+    return Image.frombytes('RGBA', img.size, bytes(raw))
 
 
 class PilCanvas:
