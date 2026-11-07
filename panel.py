@@ -8,7 +8,7 @@ from PySide6.QtCore import QEasingCurve, QPropertyAnimation, QRectF, QSize, Qt, 
 from PySide6.QtGui import QColor, QCursor, QFont, QFontDatabase, QGuiApplication, QIcon, QPainter, QPixmap
 from PySide6.QtWidgets import (QAbstractButton, QCheckBox, QColorDialog, QComboBox, QFileDialog, QFrame, QGridLayout,
                                QHBoxLayout, QLabel, QMenu, QMessageBox, QPushButton, QScrollArea, QSlider,
-                               QStackedWidget, QVBoxLayout, QWidget)
+                               QStackedWidget, QVBoxLayout, QWidget, QWidgetAction)
 
 import packs
 
@@ -20,6 +20,8 @@ COLORS = (('Mint', '#7ecf8f'), ('Sky', '#7cc4f2'), ('Lavender', '#b9a3f0'), ('Pe
           ('Snow', '#f4f4f4'), ('Lime', '#b5e35a'))
 ACCENTS = ('#57c8ff', '#2f60d8', '#4fc1b3', '#7ecf8f', '#f2e27a', '#ff9e7a', '#ff6b6b', '#f29fc4', '#b9a3f0', '#e8e8e8')
 FONTS = ('Segoe UI Variable', 'Segoe UI', 'Bahnschrift', 'Cascadia Mono', 'Trebuchet MS', 'Comic Sans MS', 'Georgia')
+BEHAVIOUR = {'walk': 'Walk', 'run': 'Run', 'sit': 'Sit', 'lie': 'Lie down', 'dance': 'Dance',
+             'climb': 'Climb walls', 'chase': 'Chase the mouse', 'jump': 'Jump onto windows'}  # pet.ACTIONS
 RESTYLE = {'theme', 'accent', 'font'}         # redraw the whole window
 REFRESH = {'character', 'style', 'color'}     # rebuild the pages that show the character; sliders redraw nothing
 W, H, MIN_H = 460, 660, 360  # width is fixed; only the height can be dragged
@@ -567,7 +569,37 @@ class SettingsWindow(QWidget):
         lay.addLayout(row)
         self.switch_row(self.card(), 'Show pets', 'Hide every pet without quitting. The tray icon can bring them back.',
                         self.app.visible, self.app.set_visible)
+        self.behaviour(self.card(QHBoxLayout))
         self.update_count()
+
+    def behaviour(self, lay):
+        """Home: a dropdown of check boxes for what pets may do on their own."""
+        col = QVBoxLayout()
+        col.setSpacing(1)
+        col.addWidget(QLabel('Behaviour', objectName='bold'))
+        col.addWidget(QLabel('What your pets may do on their own.', objectName='muted'))
+        lay.addLayout(col, 1)
+        off = self.app.settings['off']
+        b = self.button(f'{len(BEHAVIOUR) - len(off)} of {len(BEHAVIOUR)} on  ▾', lambda: None)
+        menu = QMenu(b)
+        for key, name in BEHAVIOUR.items():
+            box = QCheckBox(name)  # check boxes in the menu: it stays open while you tick several
+            box.setChecked(key not in off)
+            box.setCursor(Qt.PointingHandCursor)
+            box.setStyleSheet('padding: 5px 10px;')
+
+            def toggled(on, k=key):
+                now = [a for a in self.app.settings['off'] if a != k] + ([] if on else [k])
+                self.app.settings['off'] = now
+                self.app.apply()
+                b.setText(f'{len(BEHAVIOUR) - len(now)} of {len(BEHAVIOUR)} on  ▾')
+            box.toggled.connect(toggled)
+            act = QWidgetAction(menu)
+            act.setDefaultWidget(box)
+            menu.addAction(act)
+        b.clicked.disconnect()
+        b.clicked.connect(lambda: menu.exec(b.mapToGlobal(b.rect().bottomLeft())))
+        lay.addWidget(b, 0, Qt.AlignVCenter)
 
     def step_pets(self, d):
         v = max(0, min(10, self.app.settings['pets'] + d))
