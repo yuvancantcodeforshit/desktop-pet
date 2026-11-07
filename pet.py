@@ -403,8 +403,9 @@ class Pet:
         if app.visible:
             self.win.show()
 
-    def set(self, state, timer=None):
-        self.state, self.timer = state, timer or random.randint(40, 200)
+    def set(self, state, timer=None, leap=False):
+        """leap: a throw or a jump (the pack's leap poses in the air); any other fall is a plain drop."""
+        self.state, self.timer, self.leap = state, timer or random.randint(40, 200), leap
         self.since = getattr(self, 'frame', 0)  # pack animations start from their first picture
 
     def land(self, hard=False, full=False):
@@ -549,7 +550,7 @@ class Pet:
         self.spin = math.degrees(self.th) + (180 if self.state == 'hang' else 0)
         self.spin_v = max(-15, min(15, math.degrees(self.om) * STEP - self.vx * (0.6 if self.state == 'hang' else 0.3)))
         self.update_area()  # dropped on another monitor: live there
-        self.set('fall')
+        self.set('fall', leap=math.hypot(self.vx, self.vy) > 4)  # let go without a throw: a plain drop
 
     def update_area(self):
         """Live on the monitor under the pet; if Settings turned that monitor off, hop to an allowed one."""
@@ -679,7 +680,7 @@ class Pet:
                 t = (-self.vy + max(0, self.vy ** 2 - 2 * GRAVITY * h) ** 0.5) / GRAVITY
                 target = min(max(cx, w[1] + self.px, L + self.px), w[3] - self.px, R - self.px)
                 self.vx = max(-25, min(25, (target - cx) / max(t, 1)))
-                self.set('fall')
+                self.set('fall', leap=True)
                 return
             move = 'idle'
         self.set(move)
@@ -723,7 +724,7 @@ class Pet:
             frames, fps = self.app.pack
             if self.state == 'drag':
                 return self.pose[0] if getattr(self, 'pose', None) else self.held_pose()
-            if s == 'fall' and 'ceiling' in frames:  # in the air: the leap poses (swing), not the pack's fall pictures
+            if s == 'fall' and self.leap and 'ceiling' in frames:  # thrown or jumping: the leap poses (swing)
                 s = 'ceiling'
             if s == 'crash' and 'land' in frames:  # crashed: face down, the landing animation's first picture
                 return frames['land'][1 if d < 0 else 0][0]
