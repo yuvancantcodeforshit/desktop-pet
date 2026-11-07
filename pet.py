@@ -392,6 +392,7 @@ class Pet:
         self.vx = self.vy = 0
         self.spin = self.spin_v = 0  # degrees, degrees per step: tumble in the air after a throw
         self.th = self.om = 0.0  # radians, radians/s: swing about the held hand or foot (0: hanging straight down)
+        self.lean, self.pose = 0.0, None  # held by the hand: the shown picture's own body angle; (picture, when)
         self.ledge = None  # the window this pet stands on, as (hwnd, left, top, right)
         self.dir = random.choice((-1, 1))
         self.frame = 0       # physics steps (30 a second): drives sprite animation and timers
@@ -444,27 +445,64 @@ class Pet:
         l, t, r, b = self.body()
         leg = self.state != 'ceiling' and my - self.y > t + 0.72 * (b - t)
         self.vx = self.vy = self.spin = self.spin_v = self.om = 0
-        self.th = 0.0
+        self.th = self.lean = self.calm = 0.0
+        self.pose = None  # (picture, when picked) while held by the hand
         self.set('hang' if leg else 'drag')
         px = self.px
         if not self.app.pack:  # the blob's held foot and raised hand are drawn at known spots (64 px grid)
             self.hx, self.hy = px / 2, px * (5 if leg else 4) / 64
-        else:  # grip the tip of the raised hand, or (held upside down) of the foot nearest the click
+        elif not leg:
+            self.held_pose()
+        else:  # grip the tip of the foot nearest the click (the picture is held upside down)
             img = self.picture()
             a = img.getchannel('A')
             dx, dy = (px - img.width) // 2, px - img.height
             l, t, r, b = img.getbbox() or (0, 0, img.width, img.height)
-            rows = range(b - 4, b) if leg else range(t, t + 4)
-            xs = [x for y in rows for x in range(l, r) if a.getpixel((x, y)) > 128] or [(l + r) / 2]
-            if leg:
-                near = min(xs, key=lambda x: abs(x - (mx - self.x - dx)))
-                foot = [x for x in xs if abs(x - near) <= 6]
-                # the picture is turned 180 degrees in its px square, so the foot's spot is mirrored both ways
-                self.hx, self.hy = px - 1 - (dx + sum(foot) / len(foot)), px - 1 - (dy + b - 3)
-            else:
-                self.hx, self.hy = dx + sum(xs) / len(xs), dy + t + 3
+            xs = [x for y in range(b - 4, b) for x in range(l, r) if a.getpixel((x, y)) > 128] or [(l + r) / 2]
+            near = min(xs, key=lambda x: abs(x - (mx - self.x - dx)))
+            foot = [x for x in xs if abs(x - near) <= 6]
+            # the picture is turned 180 degrees in its px square, so the foot's spot is mirrored both ways
+            self.hx, self.hy = px - 1 - (dx + sum(foot) / len(foot)), px - 1 - (dy + b - 3)
         self.pv, self.pm = (0.0, 0.0), (mx, my)  # smoothed pointer velocity, last pointer position
         self.follow()
+
+    def grip(self, img):
+        """Where a held picture's raised hand tip is on the px square, and its body's lean from straight down
+        under that hand (radians, + = body to the right). Measured once per picture."""
+        cache = self.app.__dict__.setdefault('grips', {})
+        key = (id(img), self.px)
+        if key not in cache:
+            raw, w = img.getchannel('A').tobytes(), img.width
+            solid = [(i % w, i // w) for i in range(len(raw)) if raw[i] > 128] or [(0, 0)]
+            cx, cy = sum(p[0] for p in solid) / len(solid), sum(p[1] for p in solid) / len(solid)
+            # the raised hand's tip: the solid point in the top half furthest from the body's middle (the head
+            # can be the highest point, but it sits close to the middle)
+            upper = [p for p in solid if p[1] < cy] or solid
+            far = max(upper, key=lambda p: (p[0] - cx) ** 2 + (p[1] - cy) ** 2)
+            tip = [p for p in upper if abs(p[0] - far[0]) <= 3 and abs(p[1] - far[1]) <= 3]
+            hx, hy = sum(p[0] for p in tip) / len(tip), sum(p[1] for p in tip) / len(tip)
+            dx, dy = (self.px - img.width) // 2, self.px - img.height
+            cache[key] = hx + dx, hy + dy, math.atan2(cx - hx, cy - hy)
+        return cache[key]
+
+    def held_pose(self):
+        """Held by the hand: the pack's monkey-bar frames (swing) show its body at many angles under one raised
+        hand, so show the one nearest the real swing angle (turning only the rest), facing the way it swings.
+        Hanging still: the plain held picture (pinch). Sets the picture's hand tip as the grip."""
+        frames = self.app.pack[0]
+        if abs(self.om) > 1.5:  # swinging hard one way: faces that way
+            self.dir = 1 if self.om > 0 else -1
+        side = 1 if self.dir < 0 else 0
+        still = abs(self.om) < 0.4 and abs(self.th) < 0.15
+        pics = frames['drag'][side] if still or 'ceiling' not in frames else frames['ceiling'][side]
+        pics = list({id(p): p for p in pics}.values())
+        want = self.th + 0.15 * self.om  # a touch ahead of the swing, like a body leading with its legs
+        best = min(pics, key=lambda p: abs(self.grip(p)[2] - want))
+        now = time.perf_counter()
+        if self.pose is None or (best is not self.pose[0] and now - self.pose[1] > 0.1):  # no flicker
+            self.pose = best, now
+        self.hx, self.hy, self.lean = self.grip(self.pose[0])
+        return self.pose[0]
 
     def follow(self, dt=0.0):
         """Held: the hand or foot sits on the pointer and the body swings below it like a pendulum, pushed by
@@ -485,6 +523,13 @@ class Pet:
                 al = (-(g - ay) * math.sin(self.th) - ax * math.cos(self.th)) / length - 2.5 * self.om
                 self.om += al * dt / n
                 self.th = max(-2.6, min(2.6, self.th + self.om * dt / n))
+            # held still a while: kicks to get free now and then (the swing then plays out on its own)
+            self.calm = self.calm + dt if abs(self.om) < 0.3 and math.hypot(vx, vy) < 60 else 0.0
+            if self.calm > 1.5 and random.random() < dt * 0.7:
+                self.om += random.choice((-1, 1)) * random.uniform(1.5, 2.5)
+                self.calm = 0.0
+        if self.state == 'drag' and self.app.pack:
+            self.held_pose()
         self.x, self.y = self.prev = mx - self.hx, my - self.hy
 
     def drag(self):
@@ -676,6 +721,8 @@ class Pet:
             d = 1 if f // 12 % 2 else -1
         if self.app.pack:  # character pack: that state's animation (or a stand-in), mirrored when facing left
             frames, fps = self.app.pack
+            if self.state == 'drag':
+                return self.pose[0] if getattr(self, 'pose', None) else self.held_pose()
             if s == 'fall' and 'ceiling' in frames:  # in the air: the leap poses (swing), not the pack's fall pictures
                 s = 'ceiling'
             if s == 'crash' and 'land' in frames:  # crashed: face down, the landing animation's first picture
@@ -701,9 +748,11 @@ class Pet:
         hang = self.state == 'hang'
         held = self.state in ('drag', 'hang')
         # turn: swing about the held hand or foot, or tumble in the air about the middle
-        turn = (round(math.degrees(self.th) / 2) * 2 if held else
+        turn = (round(math.degrees(self.th - self.lean) / 2) * 2 if held else
                 round(self.spin / 4) * 4 % 360 if self.state == 'fall' else 0)
-        key = (id(img), top, hang, turn, (round(self.hx), round(self.hy)) if held else None)
+        # held by the foot: arms and head trail behind the swing, bending the picture (px, in 2 px steps)
+        bend = round(max(-0.2, min(0.2, -self.om * 0.06)) * self.px / 2) * 2 if hang else 0
+        key = (id(img), top, hang, turn, bend, (round(self.hx), round(self.hy)) if held else None)
         shown = self.shown.get(key)
         if shown is None:
             from PIL import Image
@@ -713,9 +762,17 @@ class Pet:
             if hang:
                 canvas = canvas.transpose(Image.Transpose.ROTATE_180)
             dx = dy = 0  # where the picture's corner sits, from the pet's position
-            if turn:  # room to turn all the way round the pivot, then trimmed to what's drawn
+            if turn or bend:  # room to turn all the way round the pivot, then trimmed to what's drawn
                 big = Image.new('RGBA', (3 * px, 3 * px), (0, 0, 0, 0))
                 big.paste(canvas, (px, px))
+                if bend:  # shift each band sideways, more the further below the held foot: a smooth curve
+                    W, top_y, n = 3 * px, self.hy + px, 12
+                    ys = [top_y + (3 * px - top_y) * k / n for k in range(n + 1)]
+                    sh = [bend * min(1.0, (y - top_y) / px) ** 2 for y in ys]
+                    big = big.transform(big.size, Image.MESH, [((0, 0, W, int(top_y)), (0, 0, 0, top_y, W, top_y, W, 0))] + [
+                        ((0, int(ys[k]), W, int(ys[k + 1])),
+                         (-sh[k], ys[k], -sh[k + 1], ys[k + 1], W - sh[k + 1], ys[k + 1], W - sh[k], ys[k]))
+                        for k in range(n)], Image.BICUBIC)
                 big = big.rotate(turn, Image.BICUBIC, center=(self.hx + px, self.hy + px) if held else None)
                 l, t, r, b = big.getbbox() or (px, px, px + 1, px + 1)
                 canvas, dx, dy = big.crop((l, t, r, b)), l - px, t - px
@@ -1229,9 +1286,17 @@ def selftest():
             p.draw()
             if i == 12:
                 assert p.th < -0.05, p.th  # the body lags behind, swung to the left
+        roll, random.random = random.random, lambda: 1.0  # no struggle kicks while checking it settles
         for _ in range(400):
             p.follow(1 / 60)
+        random.random = roll
         assert abs(p.th) < 0.02 and abs(p.om) < 0.05, (p.th, p.om)  # swung back and settled
+        for _ in range(600):  # held still: kicks now and then
+            p.follow(1 / 60)
+            if abs(p.om) > 1:
+                break
+        assert abs(p.om) > 1, 'struggles when held still'
+        p.th = p.om = 0.0
         p.trail = [(time.perf_counter() - 0.05, 0, 100), (time.perf_counter(), 60, 100)]
         p.drop()
         assert p.state == 'fall' and p.spin_v < 0  # thrown right: rolls clockwise
