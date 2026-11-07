@@ -395,7 +395,7 @@ class Pet:
         self.lean, self.pose = 0.0, None  # held by the hand: the shown picture's own body angle; (picture, when)
         self.sparks = []  # Yellow's staff fall: sparkles off the gem, [x, y, vx, vy, life]
         self.rock = 0  # degrees: rocking on its back after landing upside down
-        self.dust = []  # TDL's landing: puffs along the floor, [x, y, vx, vy, life, size] from his feet
+        self.dust = []  # TDL's landing: wind streaks along the floor, [side, height, reach, life, lifespan, curl]
         self.ledge = None  # the window this pet stands on, as (hwnd, left, top, right)
         self.dir = random.choice((-1, 1))
         self.frame = 0       # physics steps (30 a second): drives sprite animation and timers
@@ -579,9 +579,8 @@ class Pet:
 
     # --- behaviour ---
     def step(self):
-        if self.dust:  # TDL's landing dust: slows, drifts up a touch, grows and fades
-            self.dust = [[x + vx, y + vy, vx * 0.88, vy * 0.95, life - 1, size * 1.05]
-                         for x, y, vx, vy, life, size in self.dust if life > 1]
+        if self.dust:  # TDL's landing wind: each gust runs its course
+            self.dust = [g[:3] + [g[3] - 1] + g[4:] for g in self.dust if g[3] > 1]
         L, T, R, B = self.area
         px, speed = self.px, self.app.settings['speed']
         floor, s = B - px, self.state
@@ -632,11 +631,14 @@ class Pet:
                 tdl = self.app.pack and not self.leap and self.app.settings['character'] == 'TDL'  # by name
                 hard = not (staff or tdl) and (self.vy > 30 or abs(self.spin) > 50)
                 self.sparks = []
-                if tdl:  # slams down: dust bursts out both ways along the floor (the taskbar's top edge)
+                if tdl:  # slams down: gusts of wind shoot out both ways along the floor (the taskbar's top edge)
                     k = px / 128
-                    self.dust = [[side * random.uniform(0, 6) * k, 0.0, side * random.uniform(4, 15) * k,
-                                  -random.uniform(0, 1.2) * k, random.randint(16, 26), random.uniform(5, 11) * k]
-                                 for side in (-1, 1) for _ in range(13)]
+                    self.dust = []
+                    for side in (-1, 1):
+                        for j in range(4):
+                            life = random.randint(14, 20)
+                            self.dust.append([side, (j * 6 + random.uniform(0, 4)) * k, random.uniform(80, 150) * k,
+                                              life, life, random.uniform(6, 14) * k])
                 self.vx, self.vy, self.spin, self.spin_v = 0, 0, 0, 0
                 if back:
                     self.set('backland', 22)
@@ -842,20 +844,29 @@ class Pet:
                      round(self.y if y is None else y) + dy)
 
     def draw_dust(self, img, x, y):
-        """The picture with TDL's landing dust: soft grey-brown puffs flying out both ways from his feet."""
+        """The picture with TDL's landing wind: curved streaks shooting out both ways from his feet, low along
+        the floor, curling up at their tips, thickest in the middle, thinning and fading as they run out."""
         from PIL import Image, ImageDraw
-        px = self.px
-        pad = px * 2  # room for the dust to spread sideways
+        px, S = self.px, 2  # drawn 2x, then shrunk for smooth edges
+        pad = px * 2  # room for the wind to run sideways
+        layer = Image.new('RGBA', ((px + 2 * pad) * S, px * S), (0, 0, 0, 0))
+        d = ImageDraw.Draw(layer)
+        fx, fy = pad + px / 2, px - 2 * px / 128  # his feet
+        for side, h, reach, life, span, curl in self.dust:
+            p = 1 - life / span  # 0 -> 1 over its life
+            tip = reach * (1 - (1 - p) ** 2)  # shoots out fast, eases off
+            tail = tip * 0.45 * (0.5 + p)  # the back end catches up as it dies
+            a = int(210 * (1 - p) ** 0.7)
+            pts = []
+            for i in range(13):
+                t = i / 12  # tail -> tip
+                pts.append(((fx + side * (tail + (tip - tail) * t)) * S, (fy - h - curl * t ** 3 * (0.4 + p)) * S))
+            for i in range(12):  # tapered: thick in the middle, a point at each end
+                wdt = max(1, round(3.2 * S * px / 128 * math.sin(math.pi * (i + 0.5) / 12)))
+                d.line((pts[i], pts[i + 1]), fill=(225, 220, 210, a), width=wdt)
         im = Image.new('RGBA', (px + 2 * pad, px), (0, 0, 0, 0))
         im.alpha_composite(img, (pad + (px - img.width) // 2, px - img.height))
-        layer = Image.new('RGBA', im.size, (0, 0, 0, 0))
-        d = ImageDraw.Draw(layer)
-        fx, fy = pad + px / 2, px - 3 * px / 128  # his feet
-        for dx, dy, _, _, life, size in self.dust:
-            a = int(170 * min(1, life / 12))
-            cx, cy = fx + dx, fy + dy - size / 2
-            d.ellipse((cx - size, cy - size * 0.7, cx + size, cy + size * 0.7), fill=(205, 195, 175, a))
-        im.alpha_composite(layer)
+        im.alpha_composite(layer.resize(im.size, Image.LANCZOS))
         show_layered(self.win.hwnd, im.convert('RGBa').tobytes('raw', 'BGRa'), im.width, im.height,
                      round(self.x if x is None else x) - pad, round(self.y if y is None else y))
 
