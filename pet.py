@@ -738,7 +738,8 @@ class Pet:
                 self.set('fall', leap=True)
                 return
             move = 'idle'
-        self.set(move)
+        # Yellow (by name) stays a while at his laptop: long enough to sit, lie back, sit up (5 s each)
+        self.set(move, random.randint(320, 620) if move == 'sit' and self.app.settings['character'] == 'Yellow' else None)
         if move in ('walk', 'run'):
             self.dir = random.choice((-1, 1))
 
@@ -796,12 +797,23 @@ class Pet:
             i = int((f - self.since) * fps / 30)
             img = seq[min(i, len(seq) - 1) if s in ONCE else i % len(seq)]
             if s == 'sit' and self.app.settings['character'] == 'Yellow':  # shortcut: Yellow's laptop, by name
-                # typing: his front hand taps down in an uneven rhythm, the screen light flickers with it
-                tap = int((f // 3 * 2654435761) >> 7) % 3 != 0 and f // 3 % 2 == 0
+                # now and then he lies back with it (his lie picture, knees up), then sits up again; the
+                # screen's light flickers now and then
+                lying = (f - self.since) // 150 % 2 == 1 and 'lie' in frames
+                glow = int((f // 4 * 2654435761) >> 7) % 4 == 0
                 cache = self.app.__dict__.setdefault('laptops', {})
-                key = (id(img), tap)
+                key = (id(img), lying, glow)
                 if cache.get(key, (None,))[0] is not img:  # keyed by the picture itself (ids get reused)
-                    cache[key] = img, with_laptop(img, tap)
+                    out, x0 = with_laptop(img, False, glow)
+                    if lying:  # lies down with his knees towards the laptop, which stays exactly where it was
+                        from PIL import Image
+                        lie = min(frames['lie'][0][0], frames['lie'][1][0],
+                                  key=lambda p: abs(with_laptop(p, True)[1] - x0) if (with_laptop(p, True)[1] > 0) == (x0 > 0) else 1e9)
+                        lout, lx0 = with_laptop(lie, True, glow)
+                        shift = round(x0 - lx0)
+                        out = Image.new('RGBA', (lout.width + 2 * abs(shift), lout.height), (0, 0, 0, 0))
+                        out.alpha_composite(lout, (abs(shift) + shift, 0))
+                    cache[key] = img, out
                 img = cache[key][1]
             return img
         step = 0
@@ -830,11 +842,12 @@ class Pet:
         if shown is None:
             from PIL import Image
             px = self.px
-            canvas = Image.new('RGBA', (px, px), (0, 0, 0, 0))
-            canvas.alpha_composite(img, ((px - img.width) // 2, 0 if top else px - img.height))
+            cw = max(px, img.width)  # a picture wider than the square (Yellow's laptop) stays centred on it
+            canvas = Image.new('RGBA', (cw, px), (0, 0, 0, 0))
+            canvas.alpha_composite(img, ((cw - img.width) // 2, 0 if top else px - img.height))
             if hang:
                 canvas = canvas.transpose(Image.Transpose.ROTATE_180)
-            dx = dy = 0  # where the picture's corner sits, from the pet's position
+            dx, dy = -(cw - px) // 2, 0  # where the picture's corner sits, from the pet's position
             if turn:  # room to turn all the way round the pivot, then trimmed to what's drawn
                 big = Image.new('RGBA', (3 * px, 3 * px), (0, 0, 0, 0))
                 big.paste(canvas, (px, px))
@@ -900,10 +913,11 @@ def pet_px(settings):
     return int(SIZE * settings['size'] * DPI_SCALE)
 
 
-def with_laptop(img, tap=False):
-    """The sitting picture with a little silver laptop on the floor in front of the knees, lid open towards
-    the face (Yellow's laptop). Which way it faces comes from the picture: the knees stick out on that side.
-    tap: his front hand (the tip that sticks out past the knees) pressed down a little, the screen lit brighter."""
+def with_laptop(img, lying=False, glow=False):
+    """Yellow's laptop on the floor beside the picture, lid open towards his face: a flat silver lid with a grey
+    edge and a white logo dot, seen from behind, the screen's light on his side (brighter when glow).
+    Sitting: just in front of his knees, under his hands. Lying back (the lie picture, knees up): past his knees.
+    The picture comes back wider, the figure still in the middle, so the laptop is never cut off."""
     from PIL import Image, ImageDraw
     a = img.getchannel('A')
     l, t, r, b = a.getbbox() or (0, 0, img.width, img.height)
@@ -913,42 +927,42 @@ def with_laptop(img, tap=False):
         xs = [x for y in range(int(y0), int(y1)) for x in range(l, r) if a.getpixel((x, y)) > 128]
         return sum(xs) / len(xs) if xs else (l + r) / 2
 
-    face = -1 if mid_x(t + h * 0.45, t + h * 0.75) < mid_x(t, t + h * 0.3) else 1  # knees vs head
-    k, u = 4, h / 63  # drawn 4x then shrunk for smooth edges; u: 1/63 of the sitting figure's height
-    w = 38 * u  # laptop width
-    x0 = (l + 3 * u - w) if face < 0 else (r - 3 * u)  # just under his hands, past the knees
-    x0 = max(0, min(img.width - w, x0))  # kept inside the picture's square
-    big = Image.new('RGBA', (img.width * k, img.height * k), (0, 0, 0, 0))
+    if lying:  # the laptop goes on the side of his raised knees (the highest part)
+        face = 1 if mid_x(t, t + h * 0.35) > (l + r) / 2 else -1
+    else:  # sitting: on the side his knees stick out (knees vs head)
+        face = -1 if mid_x(t + h * 0.45, t + h * 0.75) < mid_x(t, t + h * 0.3) else 1
+    k, u = 4, img.width / 128  # drawn 4x then shrunk for smooth edges; u: 1/128 of the picture
+    w, tall, lean = 44 * u, 26 * u, 8 * u  # laptop width, lid height, how far the lid leans back
+    pad = int(w + 8 * u)  # room on both sides
+    if lying:
+        x0 = (r + 3 * u) if face > 0 else (l - 3 * u - w)
+    else:
+        x0 = (l + 3 * u - w) if face < 0 else (r - 3 * u)
+    x0 += pad
+    W = img.width + 2 * pad
+    big = Image.new('RGBA', (W * k, img.height * k), (0, 0, 0, 0))
     d = ImageDraw.Draw(big)
 
     def at(x, y):
         return (x * k, y * k)
 
-    def poly(pts, fill, outline=None):
-        d.polygon([at(x, y) for x, y in pts], fill=fill, outline=outline, width=max(1, int(u * k * 0.8)))
+    def poly(pts, fill, outline=None, width=1.2):
+        d.polygon([at(x, y) for x, y in pts], fill=fill, outline=outline, width=max(1, int(u * k * width)))
 
-    # base on the floor, then the open lid leaning back away from him, seen from behind (silver back, white logo)
-    f = -face  # the lid leans away from his face
-    bx = lambda dx: x0 + (dx if face < 0 else w - dx)  # dx measured from the far end
-    poly([(bx(0), b), (bx(w), b), (bx(w - 2 * u), b - 3 * u), (bx(2 * u), b - 3 * u)], (150, 153, 160, 255))
-    top = b - 3 * u - 24 * u
-    lid = [(bx(1 * u), b - 3 * u), (bx(w - 6 * u), b - 3 * u), (bx(w - 6 * u) - f * 6 * u, top), (bx(1 * u) - f * 6 * u, top)]
-    poly(lid, (206, 209, 214, 255), (128, 131, 138, 255))
+    f = -face if not lying else face  # the lid leans away from his face
+    bx = lambda dx: x0 + (dx if (face < 0) != lying else w - dx)  # dx measured from the end away from him
+    poly([(bx(0), b), (bx(w), b), (bx(w - 2 * u), b - 3 * u), (bx(2 * u), b - 3 * u)], (150, 153, 160, 255),
+         (110, 113, 120, 255), 0.8)
+    top = b - 3 * u - tall
+    lid = [(bx(3 * u), b - 3 * u), (bx(w - 4 * u), b - 3 * u), (bx(w - 4 * u) + f * lean, top), (bx(3 * u) + f * lean, top)]
+    poly(lid, (200, 203, 208, 255), (128, 131, 138, 255), 1.6)
     sx, sy = sum(p[0] for p in lid) / 4, sum(p[1] for p in lid) / 4
-    d.ellipse((*at(sx - 2.2 * u, sy - 2.2 * u), *at(sx + 2.2 * u, sy + 2.2 * u)), fill=(255, 255, 255, 255))
-    light = (215, 240, 255, 255) if tap else (150, 195, 240, 255)  # screen light on his side, flickering
-    d.line([at(*lid[1]), at(*lid[2])], fill=light, width=max(1, int(u * k * (1.4 if tap else 1))))
-    out = big.resize(img.size, Image.LANCZOS)
-    fig = img
-    if tap:  # the hand's strip moves down 2 units
-        fig = img.copy()
-        xa, xb = (l, l + 5 * u) if face < 0 else (r - 5 * u, r)
-        box = (int(xa), int(t + 0.2 * h), int(xb) + 1, int(t + 0.7 * h))
-        hand = img.crop(box)
-        fig.paste((0, 0, 0, 0), box)
-        fig.alpha_composite(hand, (box[0], box[1] + round(2 * u)))
-    out.alpha_composite(fig)
-    return out
+    d.ellipse((*at(sx - 2.6 * u, sy - 2.6 * u), *at(sx + 2.6 * u, sy + 2.6 * u)), fill=(255, 255, 255, 255))
+    light = (215, 240, 255, 255) if glow else (160, 200, 240, 255)  # the screen's light, on his side
+    d.line([at(*lid[1]), at(*lid[2])], fill=light, width=max(1, int(u * k * 1.3)))
+    out = big.resize((W, img.height), Image.LANCZOS)
+    out.alpha_composite(img, (pad, 0))
+    return out, x0 - W / 2  # and where the laptop starts, from the picture's middle
 
 
 def unstretched(img, app):
