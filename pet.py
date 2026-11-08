@@ -660,11 +660,11 @@ class Pet:
                 self.spin_v *= 0.985
             if self.y >= floor:
                 self.y = floor
-                # how it meets the floor: upside down = on its back; sideways or from high up (300+ px) = a crash;
-                # never off the staff
+                # how it meets the floor: upside down = on its back; sideways or from high up (600+ px, the speed a
+                # free fall reaches over that drop) = a crash; never off the staff
                 back = abs(self.spin) > 120 and self.app.pack and 'lie' in self.app.pack[0]
                 tdl = self.app.pack and not self.leap and self.app.settings['character'] == 'TDL'  # by name
-                hard = not (staff or tdl) and (self.vy > 30 or abs(self.spin) > 50)
+                hard = not (staff or tdl) and (self.vy > (2 * GRAVITY * 600) ** 0.5 or abs(self.spin) > 50)
                 self.sparks = []
                 self.vx, self.vy, self.spin, self.spin_v = 0, 0, 0, 0
                 if back:
