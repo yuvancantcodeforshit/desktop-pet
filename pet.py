@@ -539,6 +539,8 @@ class Pet:
     def resize(self):
         self.pack, self.pack_scale = self.app.get_pack(self.char)
         self.px = int(pet_px(self.app.settings) * (self.pack_scale if self.pack else 1))
+        if self.char == 'Orange' and self.pack:  # load his get-up pictures now, not mid-landing (no hitch)
+            self.getup_frames()
         self.shown.clear()
 
     # --- mouse (screen pixels from Windows, the same units as the pet's position) ---
@@ -607,6 +609,46 @@ class Pet:
             dx, dy = (self.px - img.width) // 2, self.px - img.height
             # the picture is turned 180 degrees in its px square, so the foot's spot is mirrored both ways
             cache[key] = img, (self.px - 1 - (dx + sum(low) / len(low)), self.px - 1 - (dy + b - 3))
+        return cache[key][1]
+
+    def getup_frames(self):
+        """(right, left) get-up pictures for Orange: Yellow's landing pictures after the first (push up, kneel,
+        stand), recoloured in Orange's own colour and sized like his pictures. None if Yellow's pack is missing."""
+        from collections import Counter
+        from PIL import Image, ImageChops, ImageFilter
+        cache = self.app.__dict__.setdefault('getups', {})
+        mine = self.pack[0]['idle'][0][0]
+        key = (id(mine), self.px)
+        if cache.get(key, (None,))[0] is not mine:  # keyed by the picture itself (ids get reused)
+            yellow = self.app.get_pack('Yellow')[0]
+            out = None
+            if yellow and 'land' in yellow[0]:
+                raw = mine.tobytes()
+                col = Counter(raw[i:i + 3] for i in range(0, len(raw), 4) if raw[i + 3] > 200).most_common(1)
+                col = tuple(col[0][0]) if col else (255, 140, 30)
+                pairs = []
+                for side in (0, 1):
+                    seq = []
+                    for p_ in yellow[0]['land'][side]:
+                        if not any(p_ is q for q in seq):
+                            seq.append(p_)
+                    pics = []
+                    w_ = max(3, round(6.5 * p_.width / 128)) if seq else 3  # his line width
+                    for p_ in seq[1:]:
+                        a = p_.getchannel('A')
+                        # Orange's head is a ring, Yellow's a solid disc: clear whatever lies deeper than one line
+                        # width inside a shape (only the head is that thick; the thin limbs are untouched)
+                        inner = a.point(lambda v: 255 if v > 128 else 0).filter(ImageFilter.MinFilter(2 * w_ + 1))
+                        a = ImageChops.subtract(a, inner.filter(ImageFilter.GaussianBlur(0.6)))
+                        pic = Image.new('RGBA', p_.size, col + (255,))
+                        pic.putalpha(a)
+                        if pic.size != mine.size:  # his pictures may be fitted to a different size
+                            k = mine.height / pic.height
+                            pic = pic.resize((round(pic.width * k), mine.height), Image.LANCZOS)
+                        pics.append(pic)
+                    pairs.append(pics)
+                out = tuple(pairs) if pairs[0] else None
+            cache[key] = mine, out
         return cache[key][1]
 
     def leg_pose(self):
@@ -802,10 +844,10 @@ class Pet:
                     self.land(hard)
         elif s == 'land':
             if self.timer <= 0:
-                # Orange (by name): his landing ends lying in the water, so he sits up before standing (his lie
-                # picture is on a bed, so it is not used)
-                getup = self.char == 'Orange' and self.pack and 'sit' in self.pack[0]
-                self.set('getup', 14) if getup else self.set('idle')
+                # Orange (by name): his landing ends lying in the water, so he gets up: Yellow's get-up pictures
+                # (push up, kneel, stand), recoloured orange (his own pack has none; his lie picture is on a bed)
+                getup = self.char == 'Orange' and self.getup_frames()
+                self.set('getup', 15) if getup else self.set('idle')
         elif s == 'getup' and self.timer <= 0:
             self.set('idle')
         elif s == 'crash':  # face down after a hard landing: a little hop off the floor, then lies still
@@ -926,8 +968,9 @@ class Pet:
                 s = 'ceiling'
             if s == 'crash' and 'land' in frames:  # crashed: face down, the landing animation's first picture
                 return frames['land'][1 if d < 0 else 0][0]
-            if s == 'getup':  # getting up from the floor: sitting up (then step() stands him)
-                return frames['sit'][1 if d < 0 else 0][0]
+            if s == 'getup':  # getting up from the floor: three pictures, a sixth of a second each
+                pics = self.getup_frames()[1 if d < 0 else 0]
+                return pics[min(len(pics) - 1, (f - self.since) // 5)]
             if s == 'backland':  # landed on its back: lies there a moment (then step() has it roll over and crawl up)
                 return frames['lie'][1 if d < 0 else 0][0]
             pair = next((frames[k] for k in (s,) + STAND_INS.get(s, ()) if k in frames), frames['idle'])
