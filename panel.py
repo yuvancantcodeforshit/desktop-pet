@@ -23,7 +23,7 @@ FONTS = ('Segoe UI Variable', 'Segoe UI', 'Bahnschrift', 'Cascadia Mono', 'Trebu
 BEHAVIOUR = {'walk': 'Walk', 'run': 'Run', 'sit': 'Sit', 'lie': 'Lie down', 'dance': 'Dance',
              'climb': 'Climb walls', 'jump': 'Jump onto windows'}  # pet.ACTIONS ('chase' is kept there for old settings)
 RESTYLE = {'theme', 'accent', 'font', 'character'}  # redraw the whole window (the accent follows the character)
-REFRESH = {'style', 'color'}                  # rebuild the pages that show the blob; sliders redraw nothing
+REFRESH = {'style', 'color', 'advanced'}                  # rebuild the pages that show the blob; sliders redraw nothing
 SIDE = 76  # side bar width
 W, H, MIN_H = 460 + SIDE, 660, 360  # width is fixed; only the height can be dragged
 DANGER = '#ff6b6b'
@@ -602,10 +602,10 @@ class SettingsWindow(QWidget):
         b.setToolTip(tip)
         return b
 
-    def slider(self, lay, key, text, lo, hi):
+    def slider(self, lay, key, text, lo, hi, w=70):
         row = QHBoxLayout()
         name = QLabel(text)
-        name.setFixedWidth(70)
+        name.setFixedWidth(w)
         value = QLabel(f'{self.app.settings[key]:.1f}x')
         value.setFixedWidth(40)
         sl = QSlider(Qt.Horizontal)
@@ -903,24 +903,28 @@ class SettingsWindow(QWidget):
         row.addWidget(fall)
         row.addStretch(1)
         lay.addLayout(row)
-        row = QHBoxLayout()
-        row.addWidget(QLabel('Crash height'))
-        val = QLabel(f"{opt('crash')} px")
-        val.setFixedWidth(60)
-        sl = QSlider(Qt.Horizontal)
-        sl.setRange(4, 30)  # steps of 50 px: 200..1500
-        sl.setValue(max(4, min(30, round(opt('crash') / 50))))
-        sl.setCursor(Qt.PointingHandCursor)
+        if st['advanced']:
+            row = QHBoxLayout()
+            row.addWidget(QLabel('Crash height'))
+            val = QLabel(f"{opt('crash')} px")
+            val.setFixedWidth(60)
+            sl = QSlider(Qt.Horizontal)
+            sl.setRange(4, 30)  # steps of 50 px: 200..1500
+            sl.setValue(max(4, min(30, round(opt('crash') / 50))))
+            sl.setCursor(Qt.PointingHandCursor)
 
-        def moved(v):
-            val.setText(f'{v * 50} px')
-            self.set_opt(name, 'crash', v * 50)
-        sl.valueChanged.connect(moved)
-        row.addWidget(sl, 1)
-        row.addWidget(val)
-        lay.addLayout(row)
-        lay.addWidget(QLabel('Drops from higher than this end in a crash landing.', objectName='muted'))
+            def moved(v):
+                val.setText(f'{v * 50} px')
+                self.set_opt(name, 'crash', v * 50)
+            sl.valueChanged.connect(moved)
+            row.addWidget(sl, 1)
+            row.addWidget(val)
+            lay.addLayout(row)
+            lay.addWidget(QLabel('Drops from higher than this end in a crash landing.', objectName='muted'))
         extras = self.core.CHAR_EXTRAS.get(name, ())
+        if not st['advanced']:
+            lay.addWidget(QLabel('More (crash height' + (', typed lines' if 'code' in extras else '') +
+                                 ') is under Settings > General > Advanced options.', objectName='muted', wordWrap=True))
         if extras:
             lay.addWidget(QLabel('Only for ' + name, objectName='section'))
         if 'laptop' in extras:
@@ -929,7 +933,7 @@ class SettingsWindow(QWidget):
         if 'sparkles' in extras:
             self.switch_row(lay, 'Staff sparkles', 'Sparkles fly off his staff when he falls.',
                             opt('sparkles'), lambda on: self.set_opt(name, 'sparkles', on))
-        if 'code' in extras:
+        if 'code' in extras and st['advanced']:
             lay.addWidget(QLabel('Lines he types', objectName='bold'))
             lay.addWidget(QLabel('One per line, 40 characters at most. Add " => text" to show what it prints.',
                                  objectName='muted'))
@@ -1112,7 +1116,8 @@ class SettingsWindow(QWidget):
     # --- Settings ---
     def page_settings(self):
         self.header('', 'Settings', 'How the app behaves')
-        for name, fill, color in (('General', self.sec_general, None), ('Screens', self.sec_screens, None),
+        adv = (('Physics', self.sec_physics, None),) if self.app.settings['advanced'] else ()
+        for name, fill, color in (('General', self.sec_general, None), ('Screens', self.sec_screens, None), *adv,
                                   ('Updates', self.sec_updates, None), ('About', self.sec_about, None),
                                   ('Danger zone', self.sec_danger, DANGER)):
             lay = self.card()
@@ -1146,6 +1151,28 @@ class SettingsWindow(QWidget):
     def sec_general(self, lay):
         self.switch_row(lay, 'Start with Windows', 'Open Desktop Pet automatically when you log in.',
                         self.core.autostart(), self.core.autostart)
+        self.switch_row(lay, 'Advanced options', 'Show the deep options: physics, crash height, typed lines.',
+                        self.app.settings['advanced'], self.set_advanced)
+
+    def set_advanced(self, on):
+        if on:
+            self.open_sections.add('Physics')
+        self.change('advanced', on)
+
+    def sec_physics(self, lay):
+        lay.addWidget(QLabel('Gravity: how fast pets fall. Throw power: how far a flick sends them. '
+                             'Swing damping: how fast a held pet stops swinging. Spin speed: how fast they tumble.',
+                             objectName='muted', wordWrap=True))
+        for key, text, lo, hi in (('gravity', 'Gravity', 0.5, 2), ('throw', 'Throw power', 0.3, 2),
+                                  ('damping', 'Swing damping', 0.4, 3), ('spin', 'Spin speed', 0, 2)):
+            self.slider(lay, key, text, lo, hi, 100)
+        lay.addWidget(self.button('Reset physics', self.reset_physics), 0, Qt.AlignLeft)
+
+    def reset_physics(self):
+        for k in ('gravity', 'throw', 'damping', 'spin'):
+            self.app.settings[k] = self.core.DEFAULTS[k]
+        self.app.apply()
+        self.build_pages()
 
     def sec_screens(self, lay):
         lay.addWidget(QLabel('Pets only walk on the screens you tick.', objectName='muted'))
