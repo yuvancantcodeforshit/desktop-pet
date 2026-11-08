@@ -44,7 +44,7 @@ THEMES = {
 }
 DEFAULTS = {'color': '#7ecf8f', 'speed': 1.0, 'size': 1.0, 'pets': 1, 'monitors': [], 'character': '',
             'style': 'Blob', 'theme': 'Midnight', 'accent': '', 'font': 'Segoe UI Variable', 'off': [], 'chars': {},
-            'gravity': 1.0, 'throw': 1.0, 'damping': 1.0, 'spin': 1.0, 'advanced': False}
+            'gravity': 1.0, 'throw': 1.0, 'damping': 1.0, 'spin': 1.0, 'advanced': False, 'schedule': {'on': False, 'from': 22, 'to': 7}}
 # things a pet may do on its own; Settings > Home > Behaviour turns them off (saved in 'off')
 ACTIONS = ('walk', 'run', 'sit', 'lie', 'dance', 'climb', 'chase', 'jump')
 # per-character options (Settings > Characters > Tweaks): saved as settings['chars'][name][key]
@@ -76,6 +76,34 @@ def clean_chars(v):
             if d:
                 out[name] = d
     return out
+
+# day and night (Settings > Home): calmer and sitting more at night, livelier by day
+BASE_WEIGHTS = {'walk': 3, 'idle': 2, 'sit': 2, 'run': 1, 'lie': 1, 'dance': 1, 'jump': 1}
+MOOD_WEIGHTS = {'night': {'walk': 1, 'idle': 3, 'sit': 5, 'run': 0, 'lie': 4, 'dance': 0, 'jump': 0},
+                'day': {'walk': 4, 'idle': 1, 'sit': 1, 'run': 3, 'lie': 0, 'dance': 2, 'jump': 2}}
+
+
+def clean_schedule(v):
+    """{'on', 'from', 'to'}: each field that is mistyped or out of range falls back to its default."""
+    v = v if isinstance(v, dict) else {}
+    hour = lambda x, d: x if isinstance(x, int) and not isinstance(x, bool) and 0 <= x <= 23 else d
+    return {'on': v.get('on') if isinstance(v.get('on'), bool) else False,
+            'from': hour(v.get('from'), 22), 'to': hour(v.get('to'), 7)}
+
+
+def clock_hour():
+    return time.localtime().tm_hour
+
+
+def mood(s, hour=None):
+    """None (schedule off), 'night' or 'day'. Night runs from `from` to `to`, past midnight if from > to."""
+    sch = s['schedule']
+    if not sch['on']:
+        return None
+    h = clock_hour() if hour is None else hour
+    a, b = sch['from'], sch['to']
+    night = h >= a or h < b if a > b else a <= h < b
+    return 'night' if night else 'day'
 
 RUN_KEY = r'Software\Microsoft\Windows\CurrentVersion\Run'
 # app icon; bundled next to the code (PyInstaller unpacks data files into sys._MEIPASS)
@@ -113,7 +141,7 @@ def is_hex(v):
 
 def load_settings(path=None):
     """Saved settings over defaults. Anything missing, mistyped or out of range falls back to its default."""
-    s = dict(DEFAULTS, chars={})
+    s = dict(DEFAULTS, chars={}, schedule=clean_schedule(None))
     try:
         with open(path or SETTINGS_FILE, encoding='utf-8') as f:
             saved = json.load(f)
@@ -140,6 +168,7 @@ def load_settings(path=None):
         if k in saved and ok(saved[k]):
             s[k] = saved[k]
     s['chars'] = clean_chars(saved.get('chars'))
+    s['schedule'] = clean_schedule(saved.get('schedule'))
     if saved.get('character') is True:  # v1.0.3 kept one custom image; it becomes a pack at startup
         s['character'] = '__migrate__'
     s['pets'] = int(s['pets'])
@@ -777,10 +806,12 @@ class Pet:
         """Pick what to do next while standing around."""
         L, T, R, B = self.area
         off = self.app.settings['off']
-        choices = [m for m in ['walk'] * 3 + ['idle'] * 2 + ['sit'] * 2 + ['run', 'lie', 'dance'] if m not in off]
+        weights = MOOD_WEIGHTS.get(mood(self.app.settings), BASE_WEIGHTS)
+        pick = lambda wt: [m for m, n in wt.items() if m != 'jump' for _ in range(n) if m not in off]
+        choices = pick(weights) or pick(BASE_WEIGHTS)  # everything the mood likes is switched off: plain weights
         if (w and not self.ledge and 'jump' not in off and w[2] < self.y and w[3] - w[1] > self.px * 2
                 and w[1] < R - self.px and w[3] > L + self.px):  # only windows on this pet's screen
-            choices.append('jump')
+            choices += ['jump'] * weights['jump']
         move = random.choice(choices)
         if move == 'jump':  # leap up onto the active window's top edge
             h = self.y + self.px - w[2]
@@ -1822,6 +1853,19 @@ def selftest():
         panel.change('size', 2.0)
         panel.animate()
         panel.change('size', 1.0)
+        assert clean_schedule({'on': 'x', 'from': 25, 'to': 7}) == {'on': False, 'from': 22, 'to': 7}
+        night = {'schedule': {'on': True, 'from': 22, 'to': 7}}
+        assert [mood(night, h) for h in (23, 3, 12)] == ['night', 'night', 'day']
+        assert mood({'schedule': {'on': True, 'from': 9, 'to': 17}}, 12) == 'night' and mood({'schedule': {'on': False}}, 3) is None
+        panel.set_schedule('on', True)
+        assert load_settings()['schedule']['on'] is True
+        globals()['clock_hour'] = lambda: 23
+        for _ in range(60):  # night: never runs or dances
+            p.set('idle', 1)
+            p.next_move(None, 0)
+            assert p.state in ('idle', 'sit', 'lie', 'walk'), p.state
+        globals()['clock_hour'] = lambda: time.localtime().tm_hour
+        panel.set_schedule('on', False)
         panel.show_tab('home')
         panel.spawn()  # clicking the character on Home
         assert len(app.pets) == 4 and load_settings()['pets'] == 4

@@ -29,6 +29,7 @@ SEARCH = (
     ('Pets', 'Home · how many', 'pets count number add remove spawn', 'home', None, None, False),
     ('Show pets', 'Home', 'show hide visible tray', 'home', None, None, False),
     ('Behaviour', 'Home', 'behaviour behavior walk run sit lie dance climb jump actions', 'home', None, None, False),
+    ('Day and night', 'Home · schedule', 'schedule night day calm active sleep time hours', 'home', None, None, False),
     ('Characters', 'Pick, add or delete', 'character pack zip import folder shimeji delete', 'characters', 'Characters', None, False),
     ('Fall style', 'Characters > Tweaks', 'tweak fall steady free gravity character', 'characters', 'Tweaks', None, False),
     ('Laptop', 'Characters > Tweaks', 'tweak laptop sit code yellow', 'characters', 'Tweaks', None, False),
@@ -839,7 +840,36 @@ class SettingsWindow(QWidget):
         self.switch_row(self.card(), 'Show pets', 'Hide every pet without quitting. The tray icon can bring them back.',
                         self.app.visible, self.app.set_visible)
         self.behaviour(self.card(QHBoxLayout))
+        self.schedule(self.card())
         self.update_count()
+
+    def schedule(self, lay):
+        """Home: calmer at night, livelier by day."""
+        s = self.app.settings['schedule']
+        self.switch_row(lay, 'Day and night', 'Calmer and sitting more at night, livelier by day.', s['on'],
+                        lambda on: self.set_schedule('on', on))
+        if not s['on']:
+            return
+        row = QHBoxLayout()
+        for label, key in (('Night from', 'from'), ('until', 'to')):
+            row.addWidget(QLabel(label))
+            box = QComboBox()
+            box.addItems([f'{h:02d}:00' for h in range(24)])
+            box.setCurrentIndex(s[key])
+            box.setStyleSheet('min-width: 70px;')
+            box.currentIndexChanged.connect(lambda i, k=key: self.set_schedule(k, i))
+            row.addWidget(box)
+        row.addStretch(1)
+        lay.addLayout(row)
+        now = self.core.mood(self.app.settings)
+        lay.addWidget(QLabel('Right now: ' + ('night, calm' if now == 'night' else 'day, lively'), objectName='muted'))
+
+    def set_schedule(self, key, value):
+        st = self.app.settings
+        st['schedule'] = self.core.clean_schedule({**st['schedule'], key: value})
+        self.app.apply()
+        if key == 'on':
+            self.build_pages()  # the hour pickers appear or go
 
     def behaviour(self, lay):
         """Home: a dropdown of check boxes for what pets may do on their own."""
