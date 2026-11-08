@@ -18,7 +18,9 @@ TABS = (('home', '', 'Home'), ('characters', '', 'Characters'),
 COLORS = (('Mint', '#7ecf8f'), ('Sky', '#7cc4f2'), ('Lavender', '#b9a3f0'), ('Peach', '#f7b98b'), ('Lemon', '#f2e27a'),
           ('Coral', '#f2847a'), ('Rose', '#f29fc4'), ('Teal', '#4fc1b3'), ('Grey', '#b0b0b0'), ('Midnight', '#4a5a8a'),
           ('Snow', '#f4f4f4'), ('Lime', '#b5e35a'))
-ACCENTS = ('#57c8ff', '#2f60d8', '#4fc1b3', '#7ecf8f', '#f2e27a', '#ff9e7a', '#ff6b6b', '#f29fc4', '#b9a3f0', '#e8e8e8')
+ACCENTS = ('#57c8ff', '#2f60d8', '#7aa2f7', '#4fc1b3', '#5ad1c8', '#88c0d0', '#9b8cff', '#b9a3f0',  # cool
+           '#7ecf8f', '#b5e35a', '#f2e27a', '#ffc83d', '#ff9e7a', '#ff7a45', '#ff6b6b', '#d94b4b',  # warm
+           '#f29fc4', '#ff7eb6', '#d8587f', '#c084fc', '#c0763a', '#a8a29e', '#e8e8e8', '#8a8f98')  # soft and neutral
 FONTS = ('Segoe UI Variable', 'Segoe UI', 'Bahnschrift', 'Cascadia Mono', 'Trebuchet MS', 'Comic Sans MS', 'Georgia')
 BEHAVIOUR = {'walk': 'Walk', 'run': 'Run', 'sit': 'Sit', 'lie': 'Lie down', 'dance': 'Dance',
              'climb': 'Climb walls', 'jump': 'Jump onto windows'}  # pet.ACTIONS ('chase' is kept there for old settings)
@@ -110,7 +112,7 @@ def accent_of(core, s):
 def menu_qss(core, s):
     """Right-click and tray menus in the Settings theme (they are not part of the Settings window)."""
     bg, card, _, text, _ = core.THEMES[s['theme']]
-    acc, light = accent_of(core, s), s['theme'] == 'Light'
+    acc, light = accent_of(core, s), ink(bg) == '#111111'  # a light theme has dark text on it
     edge = shade(card, 0.88) if light else shade(card, 1.32)
     return (f'QMenu {{ background: {card}; color: {text}; border: 1px solid {edge}; padding: 4px; }}'
             f'QMenu::item {{ padding: 6px 18px; border-radius: 6px; }}'
@@ -263,7 +265,7 @@ class SettingsWindow(QWidget):
         """Windows 11 Mica behind the window, dark or light with the theme. Fails: plain opaque background."""
         try:
             h, dwm = ctypes.c_void_p(int(self.winId())), ctypes.windll.dwmapi
-            dwm.DwmSetWindowAttribute(h, 20, ctypes.byref(ctypes.c_int(self.app.settings['theme'] != 'Light')), 4)
+            dwm.DwmSetWindowAttribute(h, 20, ctypes.byref(ctypes.c_int(not self.c['light'])), 4)
             ok = (dwm.DwmExtendFrameIntoClientArea(h, ctypes.byref((ctypes.c_int * 4)(-1, -1, -1, -1))) == 0
                   and dwm.DwmSetWindowAttribute(h, 38, ctypes.byref(ctypes.c_int(2)), 4) == 0)  # 38 = backdrop, 2 = Mica
         except (OSError, AttributeError):
@@ -390,7 +392,7 @@ class SettingsWindow(QWidget):
         s = self.app.settings
         bg, card, acc, text, muted = self.core.THEMES[s['theme']]
         acc = accent_of(self.core, s)
-        light = s['theme'] == 'Light'
+        light = ink(bg) == '#111111'
         a = self.mica  # translucent layers over Mica; plain colours when there is none
         self.fill = QColor(bg)
         self.fill.setAlphaF(0.7 if a else 1.0)
@@ -1164,7 +1166,7 @@ class SettingsWindow(QWidget):
             more.setFixedSize(24, 24)
             more.setCursor(Qt.PointingHandCursor)
             more.setStyleSheet(f'font-family: "{ICONS}"; font-size: 10px; padding: 0; border: none; color: {ttext};'
-                               f'background: {shade(tbg, 0.8 if name == "Light" else 1.9)}; border-radius: 12px;')
+                               f'background: {shade(tbg, 0.8 if ink(tbg) == '#111111' else 1.9)}; border-radius: 12px;')
             more.clicked.connect(lambda _=0, n=name, b=more: self.theme_menu(n, b))
             top.addWidget(more)
             v.addLayout(top)
@@ -1178,7 +1180,7 @@ class SettingsWindow(QWidget):
             dot.setStyleSheet(f'background: {tacc}; border: none; border-radius: 6px;')
             low.addWidget(dot)
             v.addLayout(low)
-            grid.addWidget(tile, i // 2, i % 2)
+            grid.addWidget(tile, i // 3, i % 3)
         lay.addLayout(grid)
 
     def theme_menu(self, name, button):
@@ -1194,9 +1196,9 @@ class SettingsWindow(QWidget):
     def sub_accent(self, lay):
         lay.addWidget(QLabel('Accent color', objectName='section'))
         lay.addWidget(QLabel('Buttons, sliders, switches and the active tab. Auto follows your character.', objectName='muted'))
-        row = QHBoxLayout()
-        row.setSpacing(4)
-        for col in ACCENTS:
+        grid = QGridLayout()
+        grid.setSpacing(4)
+        for i, col in enumerate(ACCENTS):
             sw = Clickable(lambda v=col: self.change('accent', v))
             sw.setFixedSize(32, 32)
             h = QHBoxLayout(sw)
@@ -1204,9 +1206,9 @@ class SettingsWindow(QWidget):
             pic = QLabel()
             pic.setPixmap(self.pixmap(dot_icon(col, self.c['text'] if col.lower() == self.c['acc'].lower() else None), 30))
             h.addWidget(pic)
-            row.addWidget(sw)
-        row.addStretch(1)
-        lay.addLayout(row)
+            grid.addWidget(sw, i // 8, i % 8)
+        grid.setColumnStretch(8, 1)
+        lay.addLayout(grid)
         row = QHBoxLayout()
         row.addWidget(self.button('Pick color...', self.pick_accent))
         row.addWidget(self.button('Auto', lambda: self.change('accent', '')))
