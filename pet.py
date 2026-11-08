@@ -672,6 +672,34 @@ class Pet:
             cache[key] = mine, out
         return cache[key][1]
 
+    def back_pose(self, k, side):
+        """Landing on his back, k steps in (1/30 s each), in his own pictures, like a person:
+        0-15 flat on his back (his standing picture laid along the floor);
+        15-26 sitting up (his sit picture); 26-40 up onto a knee, then standing (the last two pictures of his
+        get-up: his landing animation's, or Orange's borrowed get-up)."""
+        from PIL import Image
+        frames = self.pack[0]
+        cache = self.app.__dict__.setdefault('backs', {})
+        mine = frames['idle'][0][0]
+        key = (id(mine), self.px, side)
+        if cache.get(key, (None,))[0] is not mine:  # keyed by the picture itself (ids get reused)
+            uniq = lambda ps: [q for q in {id(q): q for q in ps}.values()]
+            flat = turned(frames['idle'][side][0], 90 if side == 0 else -90)  # his standing self, flat on his back
+            bb = flat.getbbox() or (0, 0, flat.width, flat.height)
+            flat = flat.crop((bb[0], bb[1], bb[2], bb[3]))
+            lying = Image.new('RGBA', (max(self.px, flat.width), self.px), (0, 0, 0, 0))
+            lying.alpha_composite(flat, ((lying.width - flat.width) // 2, self.px - flat.height))  # on the floor
+            up = (self.getup_frames()[side] if self.char == 'Orange' and self.getup_frames() else
+                  uniq(frames['land'][side]) if 'land' in frames else [frames['idle'][side][0]])
+            sit = frames['sit'][side][0] if 'sit' in frames else up[0]
+            cache[key] = mine, lying, sit, up[-2:] if len(up) > 1 else up
+        _, lying, sit, up = cache[key]
+        if k < 15:
+            return lying
+        if k < 26:
+            return sit
+        return up[min(len(up) - 1, (k - 26) // 7)]
+
     def leg_pose(self):
         """Held by the leg: the pack's monkey-bar frames that hang from a raised arm, turned upside down, so an
         arm hangs and the free leg angles off the held one. The swing picks among them (choppy on purpose): one
@@ -858,7 +886,8 @@ class Pet:
                 self.sparks = []
                 self.vx, self.vy, self.spin, self.spin_v = 0, 0, 0, 0
                 if back:
-                    self.set('backland', 15)
+                    self.set('backland', 40)  # flat on his back, sits up, kneels, stands (see back_pose)
+                    self.vy = -3  # the thump lifts him a few px
                 elif tdl:  # TDL's landing: the whole thing, slow, so it lands with weight
                     self.land(full=True, slow=1.2)
                 else:
@@ -879,8 +908,14 @@ class Pet:
                     self.y, self.vy = floor, 0
             if self.timer <= 0:
                 self.land(full=True)
-        elif s == 'backland' and self.timer <= 0:  # rolls over onto its front (the get-up's first picture), crawls up
-            self.land(full=True)
+        elif s == 'backland':  # landed on his back: a small bounce off the floor, then the get-up plays out
+            if self.vy:
+                self.y += self.vy
+                self.vy += self.g
+                if self.y >= floor:
+                    self.y, self.vy = floor, 0
+            if self.timer <= 0:
+                self.set('idle')
         elif s in ('walk', 'run'):
             self.x += (2 if s == 'walk' else 4) * speed * self.dir
             if s == 'run' and random.random() < 0.004 and 'lie' not in self.app.settings['off']:  # tripped over its own feet
@@ -992,8 +1027,8 @@ class Pet:
             if s == 'getup':  # getting up from the floor: three pictures, a sixth of a second each
                 pics = self.getup_frames()[1 if d < 0 else 0]
                 return pics[min(len(pics) - 1, (f - self.since) // 5)]
-            if s == 'backland':  # landed on its back: lies there a moment (then step() has it roll over and crawl up)
-                return frames['lie'][1 if d < 0 else 0][0]
+            if s == 'backland':  # flat on his back, then sits up, kneels and stands
+                return self.back_pose(f - self.since, 1 if d < 0 else 0)
             pair = next((frames[k] for k in (s,) + STAND_INS.get(s, ()) if k in frames), frames['idle'])
             seq = pair[1] if d < 0 else pair[0]
             i = int((f - self.since) * fps / 30 / (getattr(self, 'land_slow', 1) if s == 'land' else 1))
