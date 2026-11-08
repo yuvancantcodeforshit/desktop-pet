@@ -615,7 +615,7 @@ class Pet:
         """(right, left) get-up pictures for Orange: Yellow's landing pictures after the first (push up, kneel,
         stand), recoloured in Orange's own colour and sized like his pictures. None if Yellow's pack is missing."""
         from collections import Counter
-        from PIL import Image, ImageChops, ImageFilter
+        from PIL import Image, ImageDraw, ImageFilter
         cache = self.app.__dict__.setdefault('getups', {})
         mine = self.pack[0]['idle'][0][0]
         key = (id(mine), self.px)
@@ -633,15 +633,31 @@ class Pet:
                         if not any(p_ is q for q in seq):
                             seq.append(p_)
                     pics = []
-                    w_ = max(3, round(6.5 * p_.width / 128)) if seq else 3  # his line width
+                    w_ = max(3, round(6.5 * p_.width / 128)) if seq else 3  # line width
+                    # Orange's own head (a ring), cut from his standing picture
+                    ma = mine.getchannel('A')
+                    ml, mt, mr, mb = ma.getbbox() or (0, 0, mine.width, mine.height)
+                    rows = [(y, [x for x in range(ml, mr) if ma.getpixel((x, y)) > 128]) for y in range(mt, mt + (mb - mt) // 3)]
+                    widest = max(rows, key=lambda r: (r[1][-1] - r[1][0]) if r[1] else 0)
+                    R = (widest[1][-1] - widest[1][0] + 1) / 2 if widest[1] else 10
+                    hx0 = (widest[1][-1] + widest[1][0]) / 2 if widest[1] else mine.width / 2
+                    his_head = mine.crop((round(hx0 - R - 1), mt, round(hx0 + R + 1), round(mt + 2 * R + 1)))
                     for p_ in seq[1:]:
                         a = p_.getchannel('A')
-                        # Orange's head is a ring, Yellow's a solid disc: clear whatever lies deeper than one line
-                        # width inside a shape (only the head is that thick; the thin limbs are untouched)
+                        # Yellow's head is a smaller solid disc: find it (the only part thicker than a line), clear
+                        # it, and put Orange's own ring head in its place
                         inner = a.point(lambda v: 255 if v > 128 else 0).filter(ImageFilter.MinFilter(2 * w_ + 1))
-                        a = ImageChops.subtract(a, inner.filter(ImageFilter.GaussianBlur(0.6)))
+                        ib = inner.getbbox()
                         pic = Image.new('RGBA', p_.size, col + (255,))
-                        pic.putalpha(a)
+                        if ib:
+                            icx, icy = (ib[0] + ib[2]) / 2, (ib[1] + ib[3]) / 2
+                            rr = (ib[2] - ib[0]) / 2 + w_ + 3  # Yellow's head radius, its soft edge included
+                            a = a.copy()
+                            ImageDraw.Draw(a).ellipse((icx - rr, icy - rr, icx + rr, icy + rr), fill=0)
+                            pic.putalpha(a)
+                            pic.alpha_composite(his_head, (round(icx - his_head.width / 2), round(icy - his_head.height / 2)))
+                        else:
+                            pic.putalpha(a)
                         if pic.size != mine.size:  # his pictures may be fitted to a different size
                             k = mine.height / pic.height
                             pic = pic.resize((round(pic.width * k), mine.height), Image.LANCZOS)
