@@ -32,7 +32,7 @@ SEARCH = (
     ('Show pets', 'Home', 'show hide visible tray', 'home', None, None, False),
     ('Behaviour', 'Home', 'behaviour behavior walk run sit lie dance climb jump actions', 'home', None, None, False),
     ('Day and night', 'Home · schedule', 'schedule night day calm active sleep time hours', 'home', None, None, False),
-    ('Characters', 'Pick, add or delete', 'character pack zip import folder shimeji delete', 'characters', 'Characters', None, False),
+    ('Characters', 'Pick, add or delete', 'character pack zip import folder shimeji delete count multiple several many', 'characters', 'Characters', None, False),
     ('Fall style', 'Characters > Tweaks', 'tweak fall steady free gravity character', 'characters', 'Tweaks', None, False),
     ('Laptop', 'Characters > Tweaks', 'tweak laptop sit code yellow', 'characters', 'Tweaks', None, False),
     ('Staff sparkles', 'Characters > Tweaks', 'tweak sparkles staff yellow fall', 'characters', 'Tweaks', None, False),
@@ -739,7 +739,10 @@ class SettingsWindow(QWidget):
         lay.addLayout(row)
 
     def change(self, key, value):
-        self.app.settings[key] = value
+        if key == 'pets':
+            self.core.set_total(self.app.settings, value)  # the main character gains or loses them
+        else:
+            self.app.settings[key] = value
         self.app.apply()
         if key in RESTYLE:
             self.crossfade(self.restyle)
@@ -957,9 +960,27 @@ class SettingsWindow(QWidget):
         self.subtabs('characters', (('Characters', '', self.sub_packs), ('Tweaks', '', self.sub_tweaks),
                                        ('Blob look', '', self.sub_blob)))
 
+    def pick_character(self, name):
+        """Click a row: it becomes the main character. With a single pet on the desk that pet swaps to it."""
+        st = self.app.settings
+        if st['pets'] == 1:
+            st['roster'] = {name: 1}
+        self.change('character', name)
+
+    def set_count(self, name, n):
+        """How many of one character are on the desk (ten pets in all, at most)."""
+        st = self.app.settings
+        r = {k: c for k, c in st['roster'].items() if k != name}
+        n = max(0, min(n, 10 - sum(r.values())))
+        if n:
+            r[name] = n
+        st['roster'], st['pets'] = r, sum(r.values())
+        self.app.apply()
+        self.build_pages()
+
     def sub_packs(self, lay):
-        lay.addWidget(QLabel(self.status or 'Drop a pack folder or .zip anywhere on this tab.',
-                             objectName='accent' if self.status else 'muted'))
+        lay.addWidget(QLabel(self.status or 'Use \u2212 and + to put several on your desk. Drop a pack folder or .zip here to add one.',
+                             objectName='accent' if self.status else 'muted', wordWrap=True))
         current = self.app.settings['character'] if self.app.pack else ''
         entries = [('', 'Default blob', 'Built in · change its look in Blob look')]
         entries += [(n, m.get('name') if isinstance(m.get('name'), str) else n,
@@ -967,7 +988,7 @@ class SettingsWindow(QWidget):
                     for n, m in packs.list_packs(self.core.PACKS_DIR)]
         for name, title, sub in entries:
             active = name == current
-            r = Clickable(lambda n=name: self.change('character', n), 'rowOn' if active else 'row')
+            r = Clickable(lambda n=name: self.pick_character(n), 'rowOn' if active else 'row')
             h = QHBoxLayout(r)
             h.setContentsMargins(8, 6, 8, 6)
             h.addWidget(self.thumb(name))
@@ -976,6 +997,14 @@ class SettingsWindow(QWidget):
             col.addWidget(QLabel(title, objectName='bold'))
             col.addWidget(QLabel(sub, objectName='muted'))
             h.addLayout(col, 1)
+            for sign, d in (('\u2212', -1), ('+', 1)):  # how many of this one are on the desk
+                if d == 1:
+                    h.addWidget(QLabel(str(self.app.settings['roster'].get(name, 0)), objectName='bold',
+                                       alignment=Qt.AlignCenter, minimumWidth=22))
+                b = self.button(sign, lambda _=0, c=name, d=d: self.set_count(c, self.app.settings['roster'].get(c, 0) + d))
+                b.setFixedSize(28, 28)
+                b.setStyleSheet('padding: 0; font-size: 15px;')
+                h.addWidget(b)
             if active:
                 ok = QLabel('')
                 ok.setStyleSheet(f'font-family: "{ICONS}"; font-size: 14px; color: {self.c["acc"]}; background: transparent;')
