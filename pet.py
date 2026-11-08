@@ -800,7 +800,12 @@ class Pet:
                     self.land(hard)
         elif s == 'land':
             if self.timer <= 0:
-                self.set('idle')
+                # Orange (by name): his landing ends lying in the water, so he sits up before standing (his lie
+                # picture is on a bed, so it is not used)
+                getup = self.char == 'Orange' and self.pack and 'sit' in self.pack[0]
+                self.set('getup', 14) if getup else self.set('idle')
+        elif s == 'getup' and self.timer <= 0:
+            self.set('idle')
         elif s == 'crash':  # face down after a hard landing: a little hop off the floor, then lies still
             if self.vy:
                 self.y += self.vy
@@ -919,6 +924,8 @@ class Pet:
                 s = 'ceiling'
             if s == 'crash' and 'land' in frames:  # crashed: face down, the landing animation's first picture
                 return frames['land'][1 if d < 0 else 0][0]
+            if s == 'getup':  # getting up from the floor: sitting up (then step() stands him)
+                return frames['sit'][1 if d < 0 else 0][0]
             if s == 'backland':  # landed on its back: lies there a moment (then step() has it roll over and crawl up)
                 return frames['lie'][1 if d < 0 else 0][0]
             pair = next((frames[k] for k in (s,) + STAND_INS.get(s, ()) if k in frames), frames['idle'])
