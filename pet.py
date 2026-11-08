@@ -43,9 +43,39 @@ THEMES = {
     'Light':    ('#f3f3f3', '#ffffff', '#2f60d8', '#1a1a1a', '#666666'),
 }
 DEFAULTS = {'color': '#7ecf8f', 'speed': 1.0, 'size': 1.0, 'pets': 1, 'monitors': [], 'character': '',
-            'style': 'Blob', 'theme': 'Midnight', 'accent': '', 'font': 'Segoe UI Variable', 'off': []}
+            'style': 'Blob', 'theme': 'Midnight', 'accent': '', 'font': 'Segoe UI Variable', 'off': [], 'chars': {}}
 # things a pet may do on its own; Settings > Home > Behaviour turns them off (saved in 'off')
 ACTIONS = ('walk', 'run', 'sit', 'lie', 'dance', 'climb', 'chase', 'jump')
+# per-character options (Settings > Characters > Tweaks): saved as settings['chars'][name][key]
+CHAR_EXTRAS = {'Yellow': ('laptop', 'sparkles', 'code')}  # options only some characters have (hard-coded by name in Pet)
+
+
+def char_default(name, key):
+    return {'fall': 'free' if name in FREE_FALL else 'steady', 'crash': 600, 'laptop': True, 'sparkles': True,
+            'code': None}[key]
+
+
+def char_opt(s, name, key):
+    """A character's option: what you saved, else its built-in default."""
+    v = s['chars'].get(name, {}).get(key)
+    return char_default(name, key) if v is None else v
+
+
+def clean_chars(v):
+    """Keep only valid per-character options; anything mistyped or out of range is dropped one by one."""
+    ok = {'fall': lambda x: x in ('steady', 'free'),
+          'crash': lambda x: isinstance(x, (int, float)) and not isinstance(x, bool) and 100 <= x <= 2000,
+          'laptop': lambda x: isinstance(x, bool), 'sparkles': lambda x: isinstance(x, bool),
+          'code': lambda x: isinstance(x, list) and 0 < len(x) <= 20
+          and all(isinstance(l, str) and 0 < len(l) <= 40 and l.isprintable() for l in x)}
+    out = {}
+    for name, d in (v.items() if isinstance(v, dict) else ()):
+        if isinstance(name, str) and re.fullmatch(r'[\w\- ]{1,40}', name) and isinstance(d, dict):
+            d = {k: x for k, x in d.items() if k in ok and ok[k](x)}
+            if d:
+                out[name] = d
+    return out
+
 RUN_KEY = r'Software\Microsoft\Windows\CurrentVersion\Run'
 # app icon; bundled next to the code (PyInstaller unpacks data files into sys._MEIPASS)
 LOGO = os.path.join(getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__))), 'logo.ico')
@@ -82,7 +112,7 @@ def is_hex(v):
 
 def load_settings(path=None):
     """Saved settings over defaults. Anything missing, mistyped or out of range falls back to its default."""
-    s = dict(DEFAULTS)
+    s = dict(DEFAULTS, chars={})
     try:
         with open(path or SETTINGS_FILE, encoding='utf-8') as f:
             saved = json.load(f)
@@ -106,6 +136,7 @@ def load_settings(path=None):
     for k, ok in checks.items():
         if k in saved and ok(saved[k]):
             s[k] = saved[k]
+    s['chars'] = clean_chars(saved.get('chars'))
     if saved.get('character') is True:  # v1.0.3 kept one custom image; it becomes a pack at startup
         s['character'] = '__migrate__'
     s['pets'] = int(s['pets'])
@@ -606,6 +637,13 @@ class Pet:
         self.x, self.y = random.randint(L, max(L, R - self.px)), T
         self.set('fall')
 
+    def opt(self, key):
+        return char_opt(self.app.settings, self.app.settings['character'], key)
+
+    def laptop(self):
+        """Yellow sits and codes at his laptop (Tweaks can turn that off)."""
+        return bool(self.app.pack) and self.app.settings['character'] == 'Yellow' and self.opt('laptop')
+
     def menu(self):
         m = QMenu()
         m.setStyleSheet(self.app.menu_qss())
@@ -618,7 +656,7 @@ class Pet:
 
     # --- behaviour ---
     def step(self):
-        if self.state == 'sit' and self.app.pack and self.app.settings['character'] == 'Yellow':
+        if self.state == 'sit' and self.laptop():
             self.term_step()
         L, T, R, B = self.area
         px, speed = self.px, self.app.settings['speed']
@@ -642,13 +680,13 @@ class Pet:
             staff = self.app.pack and not self.leap and self.app.settings['character'] == 'Yellow'
             # a plain drop falls at a steady 10 px a step; throws keep gravity, and so do these characters
             # (by name), always
-            if not self.leap and self.vy >= 0 and self.app.settings['character'] not in FREE_FALL:
+            if not self.leap and self.vy >= 0 and self.opt('fall') == 'steady':
                 self.vy = min(self.vy + GRAVITY, 10)
             else:
                 self.vy += GRAVITY
             if staff:  # sparkles fly off the gem, left behind as he comes down
                 self.sparks = [[x + vx, y + vy, vx, vy, life - 1] for x, y, vx, vy, life in self.sparks if life > 1]
-                if random.random() < 0.7:  # x is away from the rider (the side is set when drawn), y is up
+                if self.opt('sparkles') and random.random() < 0.7:  # x is away from the rider (the side is set when drawn), y is up
                     self.sparks.append([0.0, 0.0, random.uniform(0.2, 1.6), -random.uniform(1.0, 2.6), 16])
             self.x += self.vx
             self.y += self.vy
@@ -665,11 +703,11 @@ class Pet:
                 self.spin_v *= 0.985
             if self.y >= floor:
                 self.y = floor
-                # how it meets the floor: upside down = on its back; sideways or from high up (600+ px, the speed a
+                # how it meets the floor: upside down = on its back; sideways or from high up (the crash height, 600 px by default: the speed a
                 # free fall reaches over that drop) = a crash; never off the staff
                 back = abs(self.spin) > 120 and self.app.pack and 'lie' in self.app.pack[0]
                 tdl = self.app.pack and not self.leap and self.app.settings['character'] == 'TDL'  # by name
-                hard = not (staff or tdl) and (self.vy > (2 * GRAVITY * 600) ** 0.5 or abs(self.spin) > 50)
+                hard = not (staff or tdl) and (self.vy > (2 * GRAVITY * self.opt('crash')) ** 0.5 or abs(self.spin) > 50)
                 self.sparks = []
                 self.vx, self.vy, self.spin, self.spin_v = 0, 0, 0, 0
                 if back:
@@ -744,7 +782,7 @@ class Pet:
                 return
             move = 'idle'
         # Yellow (by name) codes on his laptop for 30-50 s (until picked up)
-        self.set(move, random.randint(900, 1500) if move == 'sit' and self.app.settings['character'] == 'Yellow' else None)
+        self.set(move, random.randint(900, 1500) if move == 'sit' and self.laptop() else None)
         if move in ('walk', 'run'):
             self.dir = random.choice((-1, 1))
 
@@ -815,7 +853,7 @@ class Pet:
         if not self.win.isVisible():
             return
         img = self.picture()
-        if self.state == 'sit' and self.app.pack and self.app.settings['character'] == 'Yellow':
+        if self.state == 'sit' and self.laptop():
             return self.draw_desk(x, y)
         if self.state == 'fall' and self.app.pack and not self.leap and self.app.settings['character'] == 'Yellow':
             return self.draw_staff(img, x, y)
@@ -857,6 +895,11 @@ class Pet:
             ('    print(i)', '0 1 2'), ('import random', None), ('print(random.randint(1, 6))', '4'))
     KEYS = 'qwertyuiopasdfghjklzxcvbnm'
 
+    def code_lines(self):
+        """(code, output) pairs he types: your lines from Tweaks ("code => output"), else the built-in ones."""
+        mine = self.opt('code')
+        return tuple(tuple((l.split(' => ', 1) + [None])[:2]) for l in mine) if mine else self.CODE
+
     def term_step(self):
         """One 1/30 s step of his typing: a character at an uneven pace (slower after spaces and symbols),
         now and then a wrong key he notices and backspaces, Enter at the end of a line (with its output), short
@@ -878,7 +921,8 @@ class Pet:
             t['wait'] -= 1
             return
         if not t['todo']:  # next line: plan the keystrokes, with the odd typo fixed straight away
-            code, out = self.CODE[t['n'] % len(self.CODE)]
+            lines = self.code_lines()
+            code, out = lines[t['n'] % len(lines)]
             t['n'] += 1
             for ch in code:
                 if ch.isalpha() and random.random() < 0.05:
@@ -1737,6 +1781,17 @@ def selftest():
         panel.change('pets', 3)
         assert p.px == int(2 * SIZE * DPI_SCALE) and len(app.pets) == 3 and load_settings()['pets'] == 3
         panel.pick_subtab('customize', 'Font')
+        assert char_opt(app.settings, 'Yellow', 'crash') == 600 and char_opt(app.settings, 'TDL', 'fall') == 'free'
+        assert char_opt(app.settings, 'Blue', 'fall') == 'steady'
+        assert clean_chars({'Yellow': {'crash': 5, 'laptop': 'x', 'code': ['ok', 'x = 1 => 1']}, '../x': {'crash': 900},
+                            'Blue': {'fall': 'free'}}) == {'Yellow': {'code': ['ok', 'x = 1 => 1']}, 'Blue': {'fall': 'free'}}
+        panel.set_opt('Yellow', 'crash', 900)
+        assert load_settings()['chars']['Yellow']['crash'] == 900
+        panel.edit_char = 'Test pet'
+        panel.pick_subtab('characters', 'Tweaks')
+        panel.set_opt('Yellow', 'crash', None)
+        assert 'Yellow' not in load_settings()['chars']
+        panel.pick_subtab('characters', 'Characters')
         panel.show_tab('home')
         panel.spawn()  # clicking the character on Home
         assert len(app.pets) == 4 and load_settings()['pets'] == 4
