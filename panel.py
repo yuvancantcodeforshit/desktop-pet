@@ -6,7 +6,7 @@ import colorsys, ctypes, os, sys, threading, webbrowser
 
 from PySide6.QtCore import QEasingCurve, QPoint, QPropertyAnimation, QRectF, QSize, Qt, QTimer, QVariantAnimation
 from PySide6.QtGui import QColor, QCursor, QFont, QFontDatabase, QGuiApplication, QIcon, QKeySequence, QPainter, QPixmap, QShortcut
-from PySide6.QtWidgets import (QAbstractButton, QCheckBox, QColorDialog, QComboBox, QFileDialog, QFrame, QGridLayout,
+from PySide6.QtWidgets import (QAbstractButton, QCheckBox, QColorDialog, QComboBox, QFrame, QGridLayout,
                                QGraphicsDropShadowEffect, QGraphicsOpacityEffect, QHBoxLayout, QLabel, QLineEdit, QMenu, QMessageBox, QPlainTextEdit, QPushButton, QScrollArea, QSlider,
                                QStackedWidget, QVBoxLayout, QWidget, QWidgetAction)
 
@@ -232,6 +232,11 @@ class SettingsWindow(QWidget):
         self.round_corners()
         self.fade(1)
 
+    def paintEvent(self, _):
+        # the window paints its own background: unpainted (alpha 0) pixels of a translucent window let clicks
+        # fall through to the window behind, which then covers this one
+        QPainter(self).fillRect(self.rect(), self.fill)
+
     # --- window chrome ---
     def every(self, ms, fn):
         t = QTimer(self)
@@ -387,6 +392,8 @@ class SettingsWindow(QWidget):
         acc = accent_of(self.core, s)
         light = s['theme'] == 'Light'
         a = self.mica  # translucent layers over Mica; plain colours when there is none
+        self.fill = QColor(bg)
+        self.fill.setAlphaF(0.7 if a else 1.0)
         self.c = c = dict(light=light, bg=bg, card=card, acc=acc, text=text, muted=muted, on_acc=ink(acc),
                           hover=shade(card, 0.93) if light else shade(card, 1.25),  # light theme: hover goes darker
                           border=shade(card, 0.88) if light else shade(card, 1.32),  # 1px edge: dark cards need it
@@ -399,7 +406,6 @@ class SettingsWindow(QWidget):
         self.family = body
         self.setStyleSheet(f'''
             QWidget {{ color: {c['text']}; font-family: "{body}"; font-size: 13px; }}
-            SettingsWindow {{ background: {rgba(bg, 0.7) if a else bg}; }}
             QDialog {{ background: {bg}; }}
             QScrollArea, QScrollArea > QWidget, QStackedWidget, #page {{ background: transparent; border: none; }}
             #card {{ background: {rgba(card, 0.8) if a else card}; border: 1px solid {c['border']}; border-radius: 14px; }}
@@ -950,12 +956,6 @@ class SettingsWindow(QWidget):
                                        ('Blob look', '', self.sub_blob)))
 
     def sub_packs(self, lay):
-        row = QHBoxLayout()
-        row.addWidget(self.button('+ Add .zip', self.add_zip, 'primary'))
-        row.addWidget(self.button('Add folder', self.add_folder))
-        row.addWidget(self.button('Open folder', self.open_packs))
-        row.addStretch(1)
-        lay.addLayout(row)
         lay.addWidget(QLabel(self.status or 'Drop a pack folder or .zip anywhere on this tab.',
                              objectName='accent' if self.status else 'muted'))
         current = self.app.settings['character'] if self.app.pack else ''
@@ -1120,20 +1120,6 @@ class SettingsWindow(QWidget):
         except ValueError as err:
             self.status = f"Couldn't add {os.path.basename(os.path.normpath(path))}: {err}"
             self.build_pages()
-
-    def add_zip(self):
-        path, _ = QFileDialog.getOpenFileName(self, 'Choose a character pack', '', 'Character pack (*.zip)')
-        if path:
-            self.import_pack(path)
-
-    def add_folder(self):
-        path = QFileDialog.getExistingDirectory(self, 'Choose a character pack folder')
-        if path:
-            self.import_pack(path)
-
-    def open_packs(self):
-        os.makedirs(self.core.PACKS_DIR, exist_ok=True)
-        os.startfile(self.core.PACKS_DIR)
 
     def confirm(self, title, text):
         return QMessageBox.question(self, title, text) == QMessageBox.Yes
