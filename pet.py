@@ -675,8 +675,8 @@ class Pet:
     def back_pose(self, k, side):
         """Landing on his back, k steps in (1/30 s each), in his own pictures, like a person:
         0-15 on his back, one knee bent (a mid-stride walking picture, laid with his back flat on the floor);
-        15-26 sitting up (his sit picture); 26-40 up onto a knee, then standing (the last two pictures of his
-        get-up: his landing animation's, or Orange's borrowed get-up)."""
+        15-27 sitting up (his sit picture leaning back 55, 30, 12 degrees); 27-36 sitting; 36-50 up onto a knee,
+        then standing (the last two pictures of his get-up: his landing animation's, or Orange's borrowed one)."""
         from PIL import Image
         frames = self.pack[0]
         cache = self.app.__dict__.setdefault('backs', {})
@@ -684,7 +684,8 @@ class Pet:
         key = (id(mine), self.px, side)
         if cache.get(key, (None,))[0] is not mine:  # keyed by the picture itself (ids get reused)
             uniq = lambda ps: [q for q in {id(q): q for q in ps}.values()]
-            flat = lying_flat(uniq(frames.get('walk', frames['idle'])[side])[min(2, len(uniq(frames.get('walk', frames['idle'])[side])) - 1)])
+            walks = uniq(frames.get('walk', frames['idle'])[side])
+            flat, head_side = lying_flat(walks[min(2, len(walks) - 1)])
             bb = flat.getbbox() or (0, 0, flat.width, flat.height)
             flat = flat.crop((bb[0], bb[1], bb[2], bb[3]))
             lying = Image.new('RGBA', (max(self.px, flat.width), self.px), (0, 0, 0, 0))
@@ -692,13 +693,26 @@ class Pet:
             up = (self.getup_frames()[side] if self.char == 'Orange' and self.getup_frames() else
                   uniq(frames['land'][side]) if 'land' in frames else [frames['idle'][side][0]])
             sit = frames['sit'][side][0] if 'sit' in frames else up[0]
-            cache[key] = mine, lying, sit, up[-2:] if len(up) > 1 else up
-        _, lying, sit, up = cache[key]
+            # sitting up: his sit picture leaning back towards where his head lay, rising in three steps,
+            # turned about his hips (bottom middle) and standing on the floor
+            sb = sit.getbbox() or (0, 0, sit.width, sit.height)
+            rising = []
+            for lean in (55, 30, 12):
+                t_ = turned(sit, -head_side * lean, ((sb[0] + sb[2]) / 2, sb[3] - 2))
+                tb = t_.getbbox() or (0, 0, t_.width, t_.height)
+                t_ = t_.crop(tb)
+                cv = Image.new('RGBA', (max(self.px, t_.width), self.px), (0, 0, 0, 0))
+                cv.alpha_composite(t_, ((cv.width - t_.width) // 2, self.px - t_.height))
+                rising.append(cv)
+            cache[key] = mine, lying, rising, sit, up[-2:] if len(up) > 1 else up
+        _, lying, rising, sit, up = cache[key]
         if k < 15:
             return lying
-        if k < 26:
+        if k < 27:  # sitting up: a tenth of a second per step
+            return rising[(k - 15) // 4]
+        if k < 36:
             return sit
-        return up[min(len(up) - 1, (k - 26) // 7)]
+        return up[min(len(up) - 1, (k - 36) // 7)]
 
     def leg_pose(self):
         """Held by the leg: the pack's monkey-bar frames that hang from a raised arm, turned upside down, so an
@@ -886,7 +900,7 @@ class Pet:
                 self.sparks = []
                 self.vx, self.vy, self.spin, self.spin_v = 0, 0, 0, 0
                 if back:
-                    self.set('backland', 40)  # flat on his back, sits up, kneels, stands (see back_pose)
+                    self.set('backland', 50)  # flat on his back, sits up, kneels, stands (see back_pose)
                     self.vy = -3  # the thump lifts him a few px
                 elif tdl:  # TDL's landing: the whole thing, slow, so it lands with weight
                     self.land(full=True, slow=1.2)
@@ -1396,10 +1410,17 @@ def lying_flat(img):
         pts = [(x, y) for y in range(int(y0), int(y1)) for x in range(l, r) if a.getpixel((x, y)) > 128]
         return (sum(p[0] for p in pts) / len(pts), sum(p[1] for p in pts) / len(pts)) if pts else ((l + r) / 2, (y0 + y1) / 2)
     head, hip = mid(t, t + h * 0.2), mid(t + h * 0.5, t + h * 0.58)
+    tops = [x for y in range(int(t), int(t + h * 0.25)) for x in range(l, r) if a.getpixel((x, y)) > 128]
+    R = max(4.0, (max(tops) - min(tops)) / 2) if tops else h * 0.1  # head radius
+    w = max(2.0, img.width / 128 * 6)  # line width
+    L = math.dist(head, hip) or 1
+    # lying on his back, the hips sit lower than the head's centre (head and back both touch the floor):
+    # tilt the head-to-hip line down by this much
+    tilt = math.degrees(math.asin(max(-1.0, min(1.0, (R - w / 2) / L))))
     phi = math.degrees(math.atan2(hip[1] - head[1], hip[0] - head[0]))  # the body's line, screen degrees
     best = None
     c = (img.width / 2, img.height / 2)
-    for target in (0, 180):  # head to the left or to the right
+    for target in (tilt, 180 - tilt):  # head to the left or to the right, hips a little lower
         deg = phi - target  # PIL turns counter-clockwise: a line's screen angle drops by deg
         out = turned(img, deg, c)
         bb = out.getbbox() or (0, 0, out.width, out.height)
@@ -1407,8 +1428,8 @@ def lying_flat(img):
         y_head = c[1] - (head[0] - c[0]) * math.sin(rad) + (head[1] - c[1]) * math.cos(rad)
         gap = bb[3] - y_head  # how high his head (and back) sits above the lowest point
         if best is None or gap < best[0]:
-            best = gap, out.crop(bb)
-    return best[1]
+            best = gap, out.crop(bb), (-1 if target < 90 else 1)
+    return best[1], best[2]  # the picture, and the side his head is on (-1 left, 1 right)
 
 
 def unstretched(img, app):
