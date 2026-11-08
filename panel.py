@@ -1,13 +1,13 @@
 """Settings window: right-click a pet > Settings, or click the tray icon.
-Qt (PySide6): its own dark title bar (minimize / hide to tray / close), four tabs along the bottom,
+Qt (PySide6): its own dark title bar (minimize / hide to tray / close), four tabs in a side bar,
 themes, accent colour and font. Every change applies to the pets at once and is saved.
 """
-import ctypes, os, threading, webbrowser
+import colorsys, ctypes, os, sys, threading, webbrowser
 
 from PySide6.QtCore import QEasingCurve, QPropertyAnimation, QRectF, QSize, Qt, QTimer, QVariantAnimation
 from PySide6.QtGui import QColor, QCursor, QFont, QFontDatabase, QGuiApplication, QIcon, QPainter, QPixmap
 from PySide6.QtWidgets import (QAbstractButton, QCheckBox, QColorDialog, QComboBox, QFileDialog, QFrame, QGridLayout,
-                               QGraphicsOpacityEffect, QHBoxLayout, QLabel, QMenu, QMessageBox, QPushButton, QScrollArea, QSlider,
+                               QGraphicsDropShadowEffect, QGraphicsOpacityEffect, QHBoxLayout, QLabel, QMenu, QMessageBox, QPushButton, QScrollArea, QSlider,
                                QStackedWidget, QVBoxLayout, QWidget, QWidgetAction)
 
 import packs
@@ -22,9 +22,10 @@ ACCENTS = ('#57c8ff', '#2f60d8', '#4fc1b3', '#7ecf8f', '#f2e27a', '#ff9e7a', '#f
 FONTS = ('Segoe UI Variable', 'Segoe UI', 'Bahnschrift', 'Cascadia Mono', 'Trebuchet MS', 'Comic Sans MS', 'Georgia')
 BEHAVIOUR = {'walk': 'Walk', 'run': 'Run', 'sit': 'Sit', 'lie': 'Lie down', 'dance': 'Dance',
              'climb': 'Climb walls', 'jump': 'Jump onto windows'}  # pet.ACTIONS ('chase' is kept there for old settings)
-RESTYLE = {'theme', 'accent', 'font'}         # redraw the whole window
-REFRESH = {'character', 'style', 'color'}     # rebuild the pages that show the character; sliders redraw nothing
-W, H, MIN_H = 460, 660, 360  # width is fixed; only the height can be dragged
+RESTYLE = {'theme', 'accent', 'font', 'character'}  # redraw the whole window (the accent follows the character)
+REFRESH = {'style', 'color'}                  # rebuild the pages that show the blob; sliders redraw nothing
+SIDE = 76  # side bar width
+W, H, MIN_H = 460 + SIDE, 660, 360  # width is fixed; only the height can be dragged
 DANGER = '#ff6b6b'
 CLOSE_RED = '#c42b1c'  # Windows' own close-button red
 
@@ -45,6 +46,50 @@ def ink(hex_color):
     """Readable text colour on top of hex_color."""
     r, g, b = (int(hex_color[i:i + 2], 16) for i in (1, 3, 5))
     return '#111111' if 0.299 * r + 0.587 * g + 0.114 * b > 150 else '#ffffff'
+
+
+def rgba(hex_color, a):
+    r, g, b = (int(hex_color[i:i + 2], 16) for i in (1, 3, 5))
+    return f'rgba({r},{g},{b},{int(a * 255)})'
+
+
+_ACCENTS = {}  # character -> its main colour (or None); packs rarely change, so cached for the run
+
+
+def char_accent(core, name):
+    """Main colour of a character's idle picture: the average of its most common saturated hue."""
+    if name not in _ACCENTS:
+        out = None
+        try:
+            im = packs.load_frames(os.path.join(core.PACKS_DIR, name), 48)[0]['idle'][0][0].convert('RGBA')
+            hues = {}
+            for r, g, b, a in im.getdata():
+                h, s, v = colorsys.rgb_to_hsv(r / 255, g / 255, b / 255)
+                if a > 200 and s > 0.4 and v > 0.35:
+                    hues.setdefault(int(h * 12) % 12, []).append((r, g, b))
+            if hues:
+                px = max(hues.values(), key=len)
+                out = '#%02x%02x%02x' % tuple(sum(p[i] for p in px) // len(px) for i in range(3))
+        except Exception:  # no idle picture, broken pack: the theme's own accent is used instead
+            pass
+        _ACCENTS[name] = out
+    return _ACCENTS[name]
+
+
+def accent_of(core, s):
+    """Your picked accent, else the character's colour, else the theme's."""
+    return s['accent'] or (s['character'] and char_accent(core, s['character'])) or core.THEMES[s['theme']][2]
+
+
+def menu_qss(core, s):
+    """Right-click and tray menus in the Settings theme (they are not part of the Settings window)."""
+    bg, card, _, text, _ = core.THEMES[s['theme']]
+    acc, light = accent_of(core, s), s['theme'] == 'Light'
+    edge = shade(card, 0.88) if light else shade(card, 1.32)
+    return (f'QMenu {{ background: {card}; color: {text}; border: 1px solid {edge}; padding: 4px; }}'
+            f'QMenu::item {{ padding: 6px 18px; border-radius: 6px; }}'
+            f'QMenu::item:selected {{ background: {acc}; color: {ink(acc)}; }}'
+            f'QMenu::separator {{ height: 1px; background: {edge}; margin: 4px 8px; }}')
 
 
 def dot_icon(color, ring=None, size=28):
@@ -149,6 +194,9 @@ class SettingsWindow(QWidget):
         self.setFixedWidth(W)
         self.resize(W, H)
         self.setWindowOpacity(0)
+        self.setAttribute(Qt.WA_TranslucentBackground)  # Mica shows through (Windows 11)
+        self.setAttribute(Qt.WA_StyledBackground)
+        self.mica = sys.getwindowsversion().build >= 22621
         self.restyle()
         self.anim = self.every(100, self.animate)
         self.place()
@@ -176,6 +224,20 @@ class SettingsWindow(QWidget):
                                                        ctypes.byref(ctypes.c_int(2)), 4)
         except (OSError, AttributeError):
             pass
+        self.set_backdrop()
+
+    def set_backdrop(self):
+        """Windows 11 Mica behind the window, dark or light with the theme. Fails: plain opaque background."""
+        try:
+            h, dwm = ctypes.c_void_p(int(self.winId())), ctypes.windll.dwmapi
+            dwm.DwmSetWindowAttribute(h, 20, ctypes.byref(ctypes.c_int(self.app.settings['theme'] != 'Light')), 4)
+            ok = (dwm.DwmExtendFrameIntoClientArea(h, ctypes.byref((ctypes.c_int * 4)(-1, -1, -1, -1))) == 0
+                  and dwm.DwmSetWindowAttribute(h, 38, ctypes.byref(ctypes.c_int(2)), 4) == 0)  # 38 = backdrop, 2 = Mica
+        except (OSError, AttributeError):
+            ok = False
+        if self.mica and not ok:
+            self.mica = False
+            self.restyle()
 
     def fade(self, to, then=None):
         """Ease the window's opacity to `to` (~130 ms, ease-out); instant if Windows animations are off."""
@@ -294,9 +356,10 @@ class SettingsWindow(QWidget):
         """Theme, accent or font changed (or first open): rebuild everything in the new look."""
         s = self.app.settings
         bg, card, acc, text, muted = self.core.THEMES[s['theme']]
-        acc = s['accent'] or acc
+        acc = accent_of(self.core, s)
         light = s['theme'] == 'Light'
-        self.c = c = dict(bg=bg, card=card, acc=acc, text=text, muted=muted, on_acc=ink(acc),
+        a = self.mica  # translucent layers over Mica; plain colours when there is none
+        self.c = c = dict(light=light, bg=bg, card=card, acc=acc, text=text, muted=muted, on_acc=ink(acc),
                           hover=shade(card, 0.93) if light else shade(card, 1.25),  # light theme: hover goes darker
                           border=shade(card, 0.88) if light else shade(card, 1.32),  # 1px edge: dark cards need it
                           btn_hover=shade(bg, 0.88) if light else shade(bg, 2.1),
@@ -308,8 +371,10 @@ class SettingsWindow(QWidget):
         self.family = body
         self.setStyleSheet(f'''
             QWidget {{ color: {c['text']}; font-family: "{body}"; font-size: 13px; }}
-            SettingsWindow, QScrollArea, QStackedWidget, #page {{ background: {c['bg']}; border: none; }}
-            #card {{ background: {c['card']}; border: 1px solid {c['border']}; border-radius: 12px; }}
+            SettingsWindow {{ background: {rgba(bg, 0.7) if a else bg}; }}
+            QDialog {{ background: {bg}; }}
+            QScrollArea, QScrollArea > QWidget, QStackedWidget, #page {{ background: transparent; border: none; }}
+            #card {{ background: {rgba(card, 0.8) if a else card}; border: 1px solid {c['border']}; border-radius: 14px; }}
             #row {{ background: transparent; border-radius: 10px; }}
             #row:hover {{ background: {c['hover']}; }}
             #rowOn {{ background: {c['hover']}; border-radius: 10px; }}
@@ -337,11 +402,11 @@ class SettingsWindow(QWidget):
             #chrome:pressed {{ background: {shade(c['btn_hover'], 0.85 if light else 1.2)}; }}
             #close:hover {{ background: {CLOSE_RED}; color: #ffffff; }}
             #close:pressed {{ background: {shade(CLOSE_RED, 0.85)}; color: #ffffff; }}
-            #tabbar {{ background: {c['card']}; border-top: 1px solid {c['border']}; }}
-            #tab {{ border-radius: 8px; }}
+            #side {{ background: {rgba(card, 0.45) if a else card}; border-right: 1px solid {c['border']}; }}
+            #tab {{ border-radius: 10px; }}
             #tab:hover {{ background: {c['hover']}; }}
             #tab QLabel {{ background: transparent; }}
-            #grip {{ background: {c['card']}; }}
+            #grip {{ background: transparent; }}
             QSlider::groove:horizontal {{ height: 4px; background: {c['border']}; border-radius: 2px; }}
             QSlider::sub-page:horizontal {{ background: {c['acc']}; border-radius: 2px; }}
             QSlider::handle:horizontal {{ background: {c['acc']}; width: 18px; height: 18px; margin: -7px 0;
@@ -368,14 +433,19 @@ class SettingsWindow(QWidget):
         root.setSpacing(0)
         root.addWidget(self.titlebar())
         self.stack = QStackedWidget()
-        root.addWidget(self.stack, 1)
-        root.addWidget(self.tabbar())
+        body = QHBoxLayout()
+        body.setSpacing(0)
+        body.addWidget(self.sidebar())
+        body.addWidget(self.stack, 1)
+        root.addLayout(body, 1)
         grip = QFrame(objectName='grip')
         grip.setFixedHeight(6)
         grip.setCursor(Qt.SizeVerCursor)
         grip.setAttribute(Qt.WA_TransparentForMouseEvents)  # the window itself handles the drag
         root.addWidget(grip)
         self.build_pages()
+        if self.isVisible():
+            self.set_backdrop()  # dark or light Mica follows the theme
 
     def build_pages(self):
         """(Re)build all four pages off-screen, then show the current one: no flash."""
@@ -419,6 +489,7 @@ class SettingsWindow(QWidget):
             name.setStyleSheet(f'color: {c["text"] if on else c["muted"]}; font-size: 11px;'
                                f'font-weight: {600 if on else 400};')
             bar.setStyleSheet(f'background: {c["acc"] if on else "transparent"}; border-radius: 1px;')
+            self.tab_boxes[key].setStyleSheet(f'#tab {{ background: {c["hover"]}; border-radius: 10px; }}' if on else '')
 
     # --- building blocks ---
     def titlebar(self):
@@ -447,22 +518,32 @@ class SettingsWindow(QWidget):
             row.addWidget(b)
         return bar
 
-    def tabbar(self):
-        bar = QFrame(objectName='tabbar')
-        row = QHBoxLayout(bar)
-        row.setContentsMargins(6, 6, 6, 4)
-        self.tab_parts = {}
+    def sidebar(self):
+        bar = QFrame(objectName='side')
+        bar.setFixedWidth(SIDE)
+        col = QVBoxLayout(bar)
+        col.setContentsMargins(8, 10, 8, 10)
+        col.setSpacing(4)
+        self.tab_parts, self.tab_boxes = {}, {}
         for key, icon, name in TABS:
             t = Clickable(lambda k=key: self.pick(k), 'tab')
-            col = QVBoxLayout(t)
-            col.setSpacing(2)
-            col.setContentsMargins(0, 2, 0, 2)
-            parts = (QLabel(icon), QLabel(name), QFrame())
-            parts[2].setFixedSize(24, 3)
-            for p in parts:
-                col.addWidget(p, 0, Qt.AlignHCenter)
-            row.addWidget(t, 1)
-            self.tab_parts[key] = parts
+            t.setFixedHeight(58)
+            row = QHBoxLayout(t)
+            row.setContentsMargins(0, 0, 0, 0)
+            row.setSpacing(0)
+            mark = QFrame()  # accent bar on the active tab
+            mark.setFixedSize(3, 22)
+            lab = QVBoxLayout()
+            lab.setSpacing(2)
+            parts = (QLabel(icon), QLabel(name), mark)
+            for p in parts[:2]:
+                lab.addWidget(p, 0, Qt.AlignHCenter)
+            row.addWidget(mark, 0, Qt.AlignVCenter)
+            row.addLayout(lab, 1)
+            row.addSpacing(3)
+            col.addWidget(t)
+            self.tab_parts[key], self.tab_boxes[key] = parts, t
+        col.addStretch(1)
         return bar
 
     def pixmap(self, img, size):
@@ -478,6 +559,11 @@ class SettingsWindow(QWidget):
         lay = (layout or QVBoxLayout)(f)
         lay.setContentsMargins(14, 12, 14, 12)
         lay.setSpacing(8)
+        sh = QGraphicsDropShadowEffect(f)  # soft shadow lifts the card off the window
+        sh.setBlurRadius(24)
+        sh.setOffset(0, 3)
+        sh.setColor(QColor(0, 0, 0, 40 if self.c['light'] else 110))
+        f.setGraphicsEffect(sh)
         self.body.addWidget(f)
         return lay
 
@@ -887,7 +973,7 @@ class SettingsWindow(QWidget):
 
     def sub_accent(self, lay):
         lay.addWidget(QLabel('Accent color', objectName='section'))
-        lay.addWidget(QLabel('Buttons, sliders, switches and the active tab.', objectName='muted'))
+        lay.addWidget(QLabel('Buttons, sliders, switches and the active tab. Auto follows your character.', objectName='muted'))
         row = QHBoxLayout()
         row.setSpacing(4)
         for col in ACCENTS:
@@ -903,7 +989,7 @@ class SettingsWindow(QWidget):
         lay.addLayout(row)
         row = QHBoxLayout()
         row.addWidget(self.button('Pick color...', self.pick_accent))
-        row.addWidget(self.button('Theme default', lambda: self.change('accent', '')))
+        row.addWidget(self.button('Auto', lambda: self.change('accent', '')))
         row.addStretch(1)
         lay.addLayout(row)
 
