@@ -523,8 +523,10 @@ class Pet:
         self.land_slow = slow
         if frames is None:
             self.set('land', 6)
+        elif hard and 'land' in frames and self.char == 'Orange':  # by name: his landing pictures, all evenly timed
+            return self.land(full=True)
         elif hard and 'land' in frames:
-            self.set('crash', 11 if self.char == 'Orange' else 22)  # Orange (by name): his first picture is shorter
+            self.set('crash', 22)
             self.vy = -3.5  # the body thumps the floor and lifts a few px
         elif 'land' in frames:
             ticks = round(len(frames['land'][0]) * 30 / self.pack[1] * slow)
