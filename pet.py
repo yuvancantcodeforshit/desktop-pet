@@ -1809,6 +1809,19 @@ def selftest():
         save_settings(dict(app.settings, throw=99, damping='x', advanced=1))
         assert load_settings()['throw'] == 1.0 and load_settings()['damping'] == 1.0 and not load_settings()['advanced']
         app.apply()
+        panel.search.setText('gravity')
+        phys = [h for h in panel.hits if h[0] == 'Physics']
+        assert phys and panel.results.isVisible()
+        panel.go(phys[0])  # jumps to Settings > Physics and switches Advanced on
+        assert panel.tab == 'settings' and app.settings['advanced'] and not panel.search.text()
+        panel.change('advanced', False)
+        panel.search.setText('zzzz')
+        assert not panel.hits and panel.results.isVisible()
+        panel.search.clear()
+        panel.show_tab('home')
+        panel.change('size', 2.0)
+        panel.animate()
+        panel.change('size', 1.0)
         panel.show_tab('home')
         panel.spawn()  # clicking the character on Home
         assert len(app.pets) == 4 and load_settings()['pets'] == 4

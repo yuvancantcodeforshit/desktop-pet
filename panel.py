@@ -4,10 +4,10 @@ themes, accent colour and font. Every change applies to the pets at once and is 
 """
 import colorsys, ctypes, os, sys, threading, webbrowser
 
-from PySide6.QtCore import QEasingCurve, QPropertyAnimation, QRectF, QSize, Qt, QTimer, QVariantAnimation
-from PySide6.QtGui import QColor, QCursor, QFont, QFontDatabase, QGuiApplication, QIcon, QPainter, QPixmap
+from PySide6.QtCore import QEasingCurve, QPoint, QPropertyAnimation, QRectF, QSize, Qt, QTimer, QVariantAnimation
+from PySide6.QtGui import QColor, QCursor, QFont, QFontDatabase, QGuiApplication, QIcon, QKeySequence, QPainter, QPixmap, QShortcut
 from PySide6.QtWidgets import (QAbstractButton, QCheckBox, QColorDialog, QComboBox, QFileDialog, QFrame, QGridLayout,
-                               QGraphicsDropShadowEffect, QGraphicsOpacityEffect, QHBoxLayout, QLabel, QMenu, QMessageBox, QPlainTextEdit, QPushButton, QScrollArea, QSlider,
+                               QGraphicsDropShadowEffect, QGraphicsOpacityEffect, QHBoxLayout, QLabel, QLineEdit, QMenu, QMessageBox, QPlainTextEdit, QPushButton, QScrollArea, QSlider,
                                QStackedWidget, QVBoxLayout, QWidget, QWidgetAction)
 
 import packs
@@ -22,6 +22,31 @@ ACCENTS = ('#57c8ff', '#2f60d8', '#4fc1b3', '#7ecf8f', '#f2e27a', '#ff9e7a', '#f
 FONTS = ('Segoe UI Variable', 'Segoe UI', 'Bahnschrift', 'Cascadia Mono', 'Trebuchet MS', 'Comic Sans MS', 'Georgia')
 BEHAVIOUR = {'walk': 'Walk', 'run': 'Run', 'sit': 'Sit', 'lie': 'Lie down', 'dance': 'Dance',
              'climb': 'Climb walls', 'jump': 'Jump onto windows'}  # pet.ACTIONS ('chase' is kept there for old settings)
+# (title, where it is, search words, tab, sub-tab, section, advanced): what the search box can jump to
+SEARCH = (
+    ('Speed', 'Home', 'speed fast slow walk', 'home', None, None, False),
+    ('Size', 'Home', 'size scale big small', 'home', None, None, False),
+    ('Pets', 'Home · how many', 'pets count number add remove spawn', 'home', None, None, False),
+    ('Show pets', 'Home', 'show hide visible tray', 'home', None, None, False),
+    ('Behaviour', 'Home', 'behaviour behavior walk run sit lie dance climb jump actions', 'home', None, None, False),
+    ('Characters', 'Pick, add or delete', 'character pack zip import folder shimeji delete', 'characters', 'Characters', None, False),
+    ('Fall style', 'Characters > Tweaks', 'tweak fall steady free gravity character', 'characters', 'Tweaks', None, False),
+    ('Laptop', 'Characters > Tweaks', 'tweak laptop sit code yellow', 'characters', 'Tweaks', None, False),
+    ('Staff sparkles', 'Characters > Tweaks', 'tweak sparkles staff yellow fall', 'characters', 'Tweaks', None, False),
+    ('Crash height', 'Characters > Tweaks', 'tweak crash landing height', 'characters', 'Tweaks', None, True),
+    ('Lines he types', 'Characters > Tweaks', 'tweak code typed lines yellow laptop', 'characters', 'Tweaks', None, True),
+    ('Blob look', 'Style and colour of the default pet', 'blob style color colour default', 'characters', 'Blob look', None, False),
+    ('Themes', 'Customize', 'theme dark light midnight ocean forest sunset grape', 'customize', 'Themes', None, False),
+    ('Accent color', 'Customize', 'accent color colour auto character', 'customize', 'Colors', None, False),
+    ('Font', 'Customize', 'font text typeface', 'customize', 'Font', None, False),
+    ('Start with Windows', 'Settings > General', 'startup autostart login boot windows', 'settings', None, 'General', False),
+    ('Advanced options', 'Settings > General', 'advanced simple deep options', 'settings', None, 'General', False),
+    ('Screens', 'Which monitors pets walk on', 'screen monitor display', 'settings', None, 'Screens', False),
+    ('Physics', 'Gravity, throw, swing, spin', 'physics gravity throw swing damping spin', 'settings', None, 'Physics', True),
+    ('Updates', 'Settings', 'update version check', 'settings', None, 'Updates', False),
+    ('About', 'Settings', 'about version', 'settings', None, 'About', False),
+    ('Danger zone', 'Settings', 'danger reset delete uninstall quit', 'settings', None, 'Danger zone', False),
+)
 RESTYLE = {'theme', 'accent', 'font', 'character'}  # redraw the whole window (the accent follows the character)
 REFRESH = {'style', 'color', 'advanced'}                  # rebuild the pages that show the blob; sliders redraw nothing
 SIDE = 76  # side bar width
@@ -199,6 +224,7 @@ class SettingsWindow(QWidget):
         self.setAttribute(Qt.WA_StyledBackground)
         self.mica = sys.getwindowsversion().build >= 22621
         self.restyle()
+        QShortcut(QKeySequence('Ctrl+F'), self, lambda: self.search.setFocus())
         self.anim = self.every(100, self.animate)
         self.place()
         self.show()
@@ -412,6 +438,9 @@ class SettingsWindow(QWidget):
             QSlider::sub-page:horizontal {{ background: {c['acc']}; border-radius: 2px; }}
             QSlider::handle:horizontal {{ background: {c['acc']}; width: 18px; height: 18px; margin: -7px 0;
                                           border-radius: 9px; border: 2px solid {c['bg']}; }}
+            QLineEdit {{ background: {c['hover']}; border: 1px solid transparent; border-radius: 14px; padding: 4px 12px; }}
+            QLineEdit:focus {{ border: 1px solid {c['acc']}; }}
+            #results {{ background: {c['card']}; border: 1px solid {c['border']}; border-radius: 12px; margin: 6px 14px 0 14px; }}
             QPlainTextEdit {{ background: {c['hover']}; border: none; border-radius: 8px; padding: 6px;
                               font-family: "Cascadia Mono", Consolas; font-size: 12px; }}
             QComboBox {{ background: {c['hover']}; border: none; border-radius: 8px; padding: 6px 10px; min-width: 140px; }}
@@ -439,7 +468,11 @@ class SettingsWindow(QWidget):
         body = QHBoxLayout()
         body.setSpacing(0)
         body.addWidget(self.sidebar())
-        body.addWidget(self.stack, 1)
+        col = QVBoxLayout()
+        col.setSpacing(0)
+        col.addWidget(self.results)
+        col.addWidget(self.stack, 1)
+        body.addLayout(col, 1)
         root.addLayout(body, 1)
         grip = QFrame(objectName='grip')
         grip.setFixedHeight(6)
@@ -494,6 +527,65 @@ class SettingsWindow(QWidget):
             bar.setStyleSheet(f'background: {c["acc"] if on else "transparent"}; border-radius: 1px;')
             self.tab_boxes[key].setStyleSheet(f'#tab {{ background: {c["hover"]}; border-radius: 10px; }}' if on else '')
 
+    # --- search (title bar) ---
+    def make_search(self, row):
+        # results sit in the layout, above the page (a floating child or window got clipped on Mica)
+        self.results = QFrame(objectName='results')
+        self.results.hide()
+        QVBoxLayout(self.results).setContentsMargins(6, 6, 6, 6)
+        self.hits = []
+        box = self.search = QLineEdit(objectName='search')
+        box.setPlaceholderText('Search settings  (Ctrl+F)')
+        box.setClearButtonEnabled(True)
+        box.setFixedWidth(200)
+        box.textChanged.connect(self.show_results)
+        box.returnPressed.connect(lambda: self.hits and self.go(self.hits[0]))
+        esc = QShortcut(QKeySequence('Esc'), box)
+        esc.setContext(Qt.WidgetShortcut)
+        esc.activated.connect(box.clear)
+        row.addSpacing(10)
+        row.addWidget(box)
+
+    def show_results(self, text):
+        words = text.lower().split()
+        self.hits = [e for e in SEARCH if all(w in f'{e[0]} {e[1]} {e[2]}'.lower() for w in words)] if words else []
+        lay = self.results.layout()
+        while lay.count():
+            w = lay.takeAt(0).widget()
+            w.setParent(None)  # gone at once, so old rows never show under the new ones
+            w.deleteLater()
+        if not words:
+            self.results.hide()
+            return
+        for e in self.hits[:6]:
+            r = Clickable(lambda e=e: self.go(e), 'row')
+            col = QVBoxLayout(r)
+            col.setContentsMargins(8, 4, 8, 4)
+            col.setSpacing(0)
+            col.addWidget(QLabel(e[0], objectName='bold'))
+            hint = e[1] + (' · Advanced' if e[6] and not self.app.settings['advanced'] else '')
+            col.addWidget(QLabel(hint, objectName='muted'))
+            lay.addWidget(r)
+        if not self.hits:
+            lay.addWidget(QLabel('Nothing matches', objectName='muted'))
+        self.results.show()
+
+    def go(self, hit):
+        """Jump to a setting: its tab, sub-tab and section (Advanced ones switch Advanced on)."""
+        _, _, _, tab, sub, section, adv = hit
+        self.search.clear()
+        if adv and not self.app.settings['advanced']:
+            self.app.settings['advanced'] = True
+            self.app.apply()
+        if sub:
+            self.subtab[tab] = sub
+        if section:
+            self.open_sections.add(section)
+        self.tab = tab
+        self.build_pages()
+        if section:
+            QTimer.singleShot(60, lambda: self.pages['settings'].ensureWidgetVisible(self.section_frames[section]))
+
     # --- building blocks ---
     def titlebar(self):
         bar = QWidget()
@@ -507,6 +599,7 @@ class SettingsWindow(QWidget):
         title = QLabel('Desktop Pet', objectName='bold')
         row.addWidget(title)
         row.addWidget(QLabel(f'v{self.core.VERSION}', objectName='badge'), 0, Qt.AlignVCenter)
+        self.make_search(row)
         row.addStretch(1)
         for icon, fn, tip, name in (('', self.showMinimized, 'Minimize', 'chrome'),
                                     ('', self.hide_to_tray, 'Hide to tray', 'chrome'),
@@ -682,20 +775,26 @@ class SettingsWindow(QWidget):
                 lab.setPixmap(pm)
         return lab
 
+    def preview_px(self):
+        """Preview size follows the Size slider (in steps of 10, so dragging does not reload pictures each tick)."""
+        return max(40, min(125, round(80 * self.app.settings['size'] / 10) * 10))
+
     def animate(self):
-        """Home preview plays the current character."""
+        """Home preview plays the current character: as big as Size, walking at Speed."""
         if not self.preview or not self.isVisible():
             return
+        s = self.app.settings
         self.frame += 3
+        px = self.preview_px()
         if self.app.pack:
-            frames = self.pack_frames(self.app.settings['character'], 110)
+            frames = self.pack_frames(s['character'], px)
             if frames:
-                seq = frames[0]['idle'][0]
-                pm = self.core.to_pixmap(seq[int(self.frame * frames[1] / 30) % len(seq)])
+                seq = frames[0]['walk' if 'walk' in frames[0] else 'idle'][0]
+                pm = self.core.to_pixmap(seq[int(self.frame * frames[1] / 30 * s['speed']) % len(seq)])
                 pm.setDevicePixelRatio(self.devicePixelRatioF())
                 self.preview.setPixmap(pm)
         else:
-            self.preview.setPixmap(self.blob_pixmap(118, 0 if self.frame % 150 < 6 else 150))  # blink now and then
+            self.preview.setPixmap(self.blob_pixmap(px, 0 if self.frame % 150 < 6 else 150))  # blink now and then
 
     # --- Home ---
     def page_home(self):
@@ -1115,12 +1214,14 @@ class SettingsWindow(QWidget):
 
     # --- Settings ---
     def page_settings(self):
+        self.section_frames = {}
         self.header('', 'Settings', 'How the app behaves')
         adv = (('Physics', self.sec_physics, None),) if self.app.settings['advanced'] else ()
         for name, fill, color in (('General', self.sec_general, None), ('Screens', self.sec_screens, None), *adv,
                                   ('Updates', self.sec_updates, None), ('About', self.sec_about, None),
                                   ('Danger zone', self.sec_danger, DANGER)):
             lay = self.card()
+            self.section_frames[name] = lay.parentWidget()
             head = Clickable(lambda: None)
             h = QHBoxLayout(head)
             h.setContentsMargins(0, 0, 0, 0)
