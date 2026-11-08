@@ -7,7 +7,7 @@ import colorsys, ctypes, os, sys, threading, webbrowser
 from PySide6.QtCore import QEasingCurve, QPoint, QPropertyAnimation, QRectF, QSize, Qt, QTimer, QVariantAnimation
 from PySide6.QtGui import QColor, QCursor, QFont, QFontDatabase, QGuiApplication, QIcon, QKeySequence, QPainter, QPixmap, QShortcut
 from PySide6.QtWidgets import (QAbstractButton, QCheckBox, QColorDialog, QComboBox, QFrame, QGridLayout,
-                               QGraphicsDropShadowEffect, QGraphicsOpacityEffect, QHBoxLayout, QLabel, QLineEdit, QMenu, QMessageBox, QPlainTextEdit, QPushButton, QScrollArea, QSlider,
+                               QGraphicsDropShadowEffect, QGraphicsOpacityEffect, QHBoxLayout, QLabel, QLineEdit, QMenu, QMessageBox, QPushButton, QScrollArea, QSlider,
                                QStackedWidget, QVBoxLayout, QWidget, QWidgetAction)
 
 import packs
@@ -34,10 +34,7 @@ SEARCH = (
     ('Day and night', 'Home · schedule', 'schedule night day calm active sleep time hours', 'home', None, None, False),
     ('Characters', 'Pick, add or delete', 'character pack zip import folder shimeji delete count multiple several many', 'characters', 'Characters', None, False),
     ('Fall style', 'Characters > Tweaks', 'tweak fall steady free gravity character', 'characters', 'Tweaks', None, False),
-    ('Laptop', 'Characters > Tweaks', 'tweak laptop sit code yellow', 'characters', 'Tweaks', None, False),
-    ('Staff sparkles', 'Characters > Tweaks', 'tweak sparkles staff yellow fall', 'characters', 'Tweaks', None, False),
     ('Crash height', 'Characters > Tweaks', 'tweak crash landing height', 'characters', 'Tweaks', None, True),
-    ('Lines he types', 'Characters > Tweaks', 'tweak code typed lines yellow laptop', 'characters', 'Tweaks', None, True),
     ('Blob look', 'Style and colour of the default pet', 'blob style color colour default', 'characters', 'Blob look', None, False),
     ('Themes', 'Customize', 'theme dark light midnight ocean forest sunset grape', 'customize', 'Themes', None, False),
     ('Accent color', 'Customize', 'accent color colour auto character', 'customize', 'Colors', None, False),
@@ -450,8 +447,6 @@ class SettingsWindow(QWidget):
             QLineEdit {{ background: {c['hover']}; border: 1px solid transparent; border-radius: 14px; padding: 4px 12px; }}
             QLineEdit:focus {{ border: 1px solid {c['acc']}; }}
             #results {{ background: {c['card']}; border: 1px solid {c['border']}; border-radius: 12px; margin: 6px 14px 0 14px; }}
-            QPlainTextEdit {{ background: {c['hover']}; border: none; border-radius: 8px; padding: 6px;
-                              font-family: "Cascadia Mono", Consolas; font-size: 12px; }}
             QComboBox {{ background: {c['hover']}; border: none; border-radius: 8px; padding: 6px 10px; min-width: 140px; }}
             QComboBox QAbstractItemView {{ background: {c['card']}; selection-background-color: {c['acc']};
                                            selection-color: {c['on_acc']}; border: 1px solid {c['border']}; }}
@@ -1081,37 +1076,9 @@ class SettingsWindow(QWidget):
             row.addWidget(val)
             lay.addLayout(row)
             lay.addWidget(QLabel('Drops from higher than this end in a crash landing.', objectName='muted'))
-        extras = self.core.CHAR_EXTRAS.get(name, ())
         if not st['advanced']:
-            lay.addWidget(QLabel('More (crash height' + (', typed lines' if 'code' in extras else '') +
-                                 ') is under Settings > General > Advanced options.', objectName='muted', wordWrap=True))
-        if extras:
-            lay.addWidget(QLabel('Only for ' + name, objectName='section'))
-        if 'laptop' in extras:
-            self.switch_row(lay, 'Laptop', 'Sits down and codes on his laptop. Off: he just sits.',
-                            opt('laptop'), lambda on: self.set_opt(name, 'laptop', on))
-        if 'sparkles' in extras:
-            self.switch_row(lay, 'Staff sparkles', 'Sparkles fly off his staff when he falls.',
-                            opt('sparkles'), lambda on: self.set_opt(name, 'sparkles', on))
-        if 'code' in extras and st['advanced']:
-            lay.addWidget(QLabel('Lines he types', objectName='bold'))
-            lay.addWidget(QLabel('One per line, 40 characters at most. Add " => text" to show what it prints.',
-                                 objectName='muted'))
-            default = [c + (f' => {o}' if o else '') for c, o in self.core.Pet.CODE]
-            box = QPlainTextEdit('\n'.join(opt('code') or default))
-            box.setFixedHeight(130)
-            lay.addWidget(box)
-
-            def save():
-                lines = [''.join(ch for ch in l if ch.isprintable())[:40].rstrip() for l in box.toPlainText().splitlines()]
-                lines = [l for l in lines if l.strip()][:20]
-                self.set_opt(name, 'code', None if not lines or lines == default else lines)
-                self.build_pages()
-            row = QHBoxLayout()
-            row.addWidget(self.button('Save lines', save, 'primary'))
-            row.addWidget(self.button('Reset lines', lambda: (self.set_opt(name, 'code', None), self.build_pages())))
-            row.addStretch(1)
-            lay.addLayout(row)
+            lay.addWidget(QLabel('More (crash height) is under Settings > General > Advanced options.',
+                                 objectName='muted', wordWrap=True))
         lay.addWidget(self.button('Reset all tweaks for ' + name,
                                   lambda: (self.app.settings['chars'].pop(name, None), self.app.apply(), self.build_pages())),
                       0, Qt.AlignLeft)

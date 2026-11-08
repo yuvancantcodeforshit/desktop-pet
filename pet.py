@@ -58,12 +58,10 @@ DEFAULTS = {'color': '#7ecf8f', 'speed': 1.0, 'size': 1.0, 'pets': 1, 'monitors'
 # things a pet may do on its own; Settings > Home > Behaviour turns them off (saved in 'off')
 ACTIONS = ('walk', 'run', 'sit', 'lie', 'dance', 'climb', 'chase', 'jump')
 # per-character options (Settings > Characters > Tweaks): saved as settings['chars'][name][key]
-CHAR_EXTRAS = {'Yellow': ('laptop', 'sparkles', 'code')}  # options only some characters have (hard-coded by name in Pet)
 
 
 def char_default(name, key):
-    return {'fall': 'free' if name in FREE_FALL else 'steady', 'crash': 600, 'laptop': True, 'sparkles': True,
-            'code': None}[key]
+    return {'fall': 'free' if name in FREE_FALL else 'steady', 'crash': 600}[key]
 
 
 def char_opt(s, name, key):
@@ -75,10 +73,7 @@ def char_opt(s, name, key):
 def clean_chars(v):
     """Keep only valid per-character options; anything mistyped or out of range is dropped one by one."""
     ok = {'fall': lambda x: x in ('steady', 'free'),
-          'crash': lambda x: isinstance(x, (int, float)) and not isinstance(x, bool) and 100 <= x <= 2000,
-          'laptop': lambda x: isinstance(x, bool), 'sparkles': lambda x: isinstance(x, bool),
-          'code': lambda x: isinstance(x, list) and 0 < len(x) <= 20
-          and all(isinstance(l, str) and 0 < len(l) <= 40 and l.isprintable() for l in x)}
+          'crash': lambda x: isinstance(x, (int, float)) and not isinstance(x, bool) and 100 <= x <= 2000}
     out = {}
     for name, d in (v.items() if isinstance(v, dict) else ()):
         if isinstance(name, str) and re.fullmatch(r'[\w\- ]{1,40}', name) and isinstance(d, dict):
@@ -788,8 +783,8 @@ class Pet:
         return char_opt(self.app.settings, self.char, key)
 
     def laptop(self):
-        """Yellow sits and codes at his laptop (Tweaks can turn that off)."""
-        return bool(self.pack) and self.char == 'Yellow' and self.opt('laptop')
+        """Yellow sits and codes at his laptop."""
+        return bool(self.pack) and self.char == 'Yellow'
 
     def menu(self):
         m = QMenu()
@@ -833,7 +828,7 @@ class Pet:
                 self.vy += self.g
             if staff:  # sparkles fly off the gem, left behind as he comes down
                 self.sparks = [[x + vx, y + vy, vx, vy, life - 1] for x, y, vx, vy, life in self.sparks if life > 1]
-                if self.opt('sparkles') and random.random() < 0.7:  # x is away from the rider (the side is set when drawn), y is up
+                if random.random() < 0.7:  # x is away from the rider (the side is set when drawn), y is up
                     self.sparks.append([0.0, 0.0, random.uniform(0.2, 1.6), -random.uniform(1.0, 2.6), 16])
             self.x += self.vx
             self.y += self.vy
@@ -1047,11 +1042,6 @@ class Pet:
             ('    print(i)', '0 1 2'), ('import random', None), ('print(random.randint(1, 6))', '4'))
     KEYS = 'qwertyuiopasdfghjklzxcvbnm'
 
-    def code_lines(self):
-        """(code, output) pairs he types: your lines from Tweaks ("code => output"), else the built-in ones."""
-        mine = self.opt('code')
-        return tuple(tuple((l.split(' => ', 1) + [None])[:2]) for l in mine) if mine else self.CODE
-
     def term_step(self):
         """One 1/30 s step of his typing: a character at an uneven pace (slower after spaces and symbols),
         now and then a wrong key he notices and backspaces, Enter at the end of a line (with its output), short
@@ -1073,8 +1063,7 @@ class Pet:
             t['wait'] -= 1
             return
         if not t['todo']:  # next line: plan the keystrokes, with the odd typo fixed straight away
-            lines = self.code_lines()
-            code, out = lines[t['n'] % len(lines)]
+            code, out = self.CODE[t['n'] % len(self.CODE)]
             t['n'] += 1
             for ch in code:
                 if ch.isalpha() and random.random() < 0.05:
@@ -1963,8 +1952,8 @@ def selftest():
         panel.pick_subtab('customize', 'Font')
         assert char_opt(app.settings, 'Yellow', 'crash') == 600 and char_opt(app.settings, 'TDL', 'fall') == 'free'
         assert char_opt(app.settings, 'Blue', 'fall') == 'steady'
-        assert clean_chars({'Yellow': {'crash': 5, 'laptop': 'x', 'code': ['ok', 'x = 1 => 1']}, '../x': {'crash': 900},
-                            'Blue': {'fall': 'free'}}) == {'Yellow': {'code': ['ok', 'x = 1 => 1']}, 'Blue': {'fall': 'free'}}
+        assert clean_chars({'Yellow': {'crash': 5, 'laptop': False}, '../x': {'crash': 900},
+                            'Blue': {'fall': 'free'}}) == {'Blue': {'fall': 'free'}}
         panel.set_opt('Yellow', 'crash', 900)
         assert load_settings()['chars']['Yellow']['crash'] == 900
         panel.edit_char = 'Test pet'
