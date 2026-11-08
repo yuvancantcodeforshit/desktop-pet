@@ -672,48 +672,6 @@ class Pet:
             cache[key] = mine, out
         return cache[key][1]
 
-    def back_pose(self, k, side):
-        """Landing on his back, k steps in (1/30 s each), in his own pictures, like a person:
-        0-15 on his back, one knee bent (a mid-stride walking picture, laid with his back flat on the floor);
-        15-27 sitting up (his sit picture leaning back 55, 30, 12 degrees); 27-36 sitting; 36-50 up onto a knee,
-        then standing (the last two pictures of his get-up: his landing animation's, or Orange's borrowed one)."""
-        from PIL import Image
-        frames = self.pack[0]
-        cache = self.app.__dict__.setdefault('backs', {})
-        mine = frames['idle'][0][0]
-        key = (id(mine), self.px, side)
-        if cache.get(key, (None,))[0] is not mine:  # keyed by the picture itself (ids get reused)
-            uniq = lambda ps: [q for q in {id(q): q for q in ps}.values()]
-            walks = uniq(frames.get('walk', frames['idle'])[side])
-            flat, head_side = lying_flat(walks[min(2, len(walks) - 1)])
-            bb = flat.getbbox() or (0, 0, flat.width, flat.height)
-            flat = flat.crop((bb[0], bb[1], bb[2], bb[3]))
-            lying = Image.new('RGBA', (max(self.px, flat.width), self.px), (0, 0, 0, 0))
-            lying.alpha_composite(flat, ((lying.width - flat.width) // 2, self.px - flat.height))  # on the floor
-            up = (self.getup_frames()[side] if self.char == 'Orange' and self.getup_frames() else
-                  uniq(frames['land'][side]) if 'land' in frames else [frames['idle'][side][0]])
-            sit = frames['sit'][side][0] if 'sit' in frames else up[0]
-            # sitting up: his sit picture leaning back towards where his head lay, rising in three steps,
-            # turned about his hips (bottom middle) and standing on the floor
-            sb = sit.getbbox() or (0, 0, sit.width, sit.height)
-            rising = []
-            for lean in (55, 30, 12):
-                t_ = turned(sit, -head_side * lean, ((sb[0] + sb[2]) / 2, sb[3] - 2))
-                tb = t_.getbbox() or (0, 0, t_.width, t_.height)
-                t_ = t_.crop(tb)
-                cv = Image.new('RGBA', (max(self.px, t_.width), self.px), (0, 0, 0, 0))
-                cv.alpha_composite(t_, ((cv.width - t_.width) // 2, self.px - t_.height))
-                rising.append(cv)
-            cache[key] = mine, lying, rising, sit, up[-2:] if len(up) > 1 else up
-        _, lying, rising, sit, up = cache[key]
-        if k < 15:
-            return lying
-        if k < 27:  # sitting up: a tenth of a second per step
-            return rising[(k - 15) // 4]
-        if k < 36:
-            return sit
-        return up[min(len(up) - 1, (k - 36) // 7)]
-
     def leg_pose(self):
         """Held by the leg: the pack's monkey-bar frames that hang from a raised arm, turned upside down, so an
         arm hangs and the free leg angles off the held one. The swing picks among them (choppy on purpose): one
@@ -892,17 +850,13 @@ class Pet:
                 self.spin_v *= 0.985
             if self.y >= floor:
                 self.y = floor
-                # how it meets the floor: upside down = on its back; sideways or from high up (the crash height, 600 px by default: the speed a
-                # free fall reaches over that drop) = a crash; never off the staff
-                back = abs(self.spin) > 120 and self.pack and 'lie' in self.pack[0]
+                # how it meets the floor: sideways or upside down, or from high up (the crash height, 600 px by
+                # default: the speed a free fall reaches over that drop) = a crash; never off the staff
                 tdl = self.pack and not self.leap and self.char == 'TDL'  # by name
                 hard = not (staff or tdl) and (self.vy > (2 * self.g * self.opt('crash')) ** 0.5 or abs(self.spin) > 50)
                 self.sparks = []
                 self.vx, self.vy, self.spin, self.spin_v = 0, 0, 0, 0
-                if back:
-                    self.set('backland', 50)  # flat on his back, sits up, kneels, stands (see back_pose)
-                    self.vy = -3  # the thump lifts him a few px
-                elif tdl:  # TDL's landing: the whole thing, slow, so it lands with weight
+                if tdl:  # TDL's landing: the whole thing, slow, so it lands with weight
                     self.land(full=True, slow=1.2)
                 else:
                     self.land(hard)
@@ -922,14 +876,6 @@ class Pet:
                     self.y, self.vy = floor, 0
             if self.timer <= 0:
                 self.land(full=True)
-        elif s == 'backland':  # landed on his back: a small bounce off the floor, then the get-up plays out
-            if self.vy:
-                self.y += self.vy
-                self.vy += self.g
-                if self.y >= floor:
-                    self.y, self.vy = floor, 0
-            if self.timer <= 0:
-                self.set('idle')
         elif s in ('walk', 'run'):
             self.x += (2 if s == 'walk' else 4) * speed * self.dir
             if s == 'run' and random.random() < 0.004 and 'lie' not in self.app.settings['off']:  # tripped over its own feet
@@ -1041,8 +987,6 @@ class Pet:
             if s == 'getup':  # getting up from the floor: three pictures, a sixth of a second each
                 pics = self.getup_frames()[1 if d < 0 else 0]
                 return pics[min(len(pics) - 1, (f - self.since) // 5)]
-            if s == 'backland':  # flat on his back, then sits up, kneels and stands
-                return self.back_pose(f - self.since, 1 if d < 0 else 0)
             pair = next((frames[k] for k in (s,) + STAND_INS.get(s, ()) if k in frames), frames['idle'])
             seq = pair[1] if d < 0 else pair[0]
             i = int((f - self.since) * fps / 30 / (getattr(self, 'land_slow', 1) if s == 'land' else 1))
@@ -1397,39 +1341,6 @@ def turned(img, deg, center=None):
     if not deg:
         return img
     return img.convert('RGBa').rotate(deg, Image.BICUBIC, center=center).convert('RGBA')
-
-
-def lying_flat(img):
-    """img (a figure standing) turned to lie on its back: head-to-hip line flat along the floor, whichever way
-    keeps the back down and a bent knee up. Cropped to what's drawn."""
-    a = img.getchannel('A')
-    l, t, r, b = a.getbbox() or (0, 0, img.width, img.height)
-    h = b - t
-
-    def mid(y0, y1):  # middle of the solid pixels in these rows
-        pts = [(x, y) for y in range(int(y0), int(y1)) for x in range(l, r) if a.getpixel((x, y)) > 128]
-        return (sum(p[0] for p in pts) / len(pts), sum(p[1] for p in pts) / len(pts)) if pts else ((l + r) / 2, (y0 + y1) / 2)
-    head, hip = mid(t, t + h * 0.2), mid(t + h * 0.5, t + h * 0.58)
-    tops = [x for y in range(int(t), int(t + h * 0.25)) for x in range(l, r) if a.getpixel((x, y)) > 128]
-    R = max(4.0, (max(tops) - min(tops)) / 2) if tops else h * 0.1  # head radius
-    w = max(2.0, img.width / 128 * 6)  # line width
-    L = math.dist(head, hip) or 1
-    # lying on his back, the hips sit lower than the head's centre (head and back both touch the floor):
-    # tilt the head-to-hip line down by this much
-    tilt = math.degrees(math.asin(max(-1.0, min(1.0, (R - w / 2) / L))))
-    phi = math.degrees(math.atan2(hip[1] - head[1], hip[0] - head[0]))  # the body's line, screen degrees
-    best = None
-    c = (img.width / 2, img.height / 2)
-    for target in (tilt, 180 - tilt):  # head to the left or to the right, hips a little lower
-        deg = phi - target  # PIL turns counter-clockwise: a line's screen angle drops by deg
-        out = turned(img, deg, c)
-        bb = out.getbbox() or (0, 0, out.width, out.height)
-        rad = math.radians(deg)
-        y_head = c[1] - (head[0] - c[0]) * math.sin(rad) + (head[1] - c[1]) * math.cos(rad)
-        gap = bb[3] - y_head  # how high his head (and back) sits above the lowest point
-        if best is None or gap < best[0]:
-            best = gap, out.crop(bb), (-1 if target < 90 else 1)
-    return best[1], best[2]  # the picture, and the side his head is on (-1 left, 1 right)
 
 
 def unstretched(img, app):
