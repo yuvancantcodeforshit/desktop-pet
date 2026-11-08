@@ -531,7 +531,7 @@ class Pet:
         elif 'land' in frames:
             ticks = round(len(frames['land'][0]) * 30 / self.pack[1] * slow)
             skip = 0 if full else ticks // 2
-            self.set('land', max(1, ticks - skip + (6 if slow > 1 else 0)))  # a slow landing holds its end a moment
+            self.set('land', max(1, ticks - skip + (3 if slow > 1 else 0)))  # a slow landing holds its end a moment
             self.since = self.frame - skip  # start partway through
         else:
             self.set('idle')
@@ -860,7 +860,7 @@ class Pet:
                 if back:
                     self.set('backland', 15)
                 elif tdl:  # TDL's landing: the whole thing, slow, so it lands with weight
-                    self.land(full=True, slow=2)
+                    self.land(full=True, slow=1.5)
                 else:
                     self.land(hard)
         elif s == 'land':
