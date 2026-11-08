@@ -615,7 +615,7 @@ class Pet:
         """(right, left) get-up pictures for Orange: Yellow's landing pictures after the first (push up, kneel,
         stand), recoloured in Orange's own colour and sized like his pictures. None if Yellow's pack is missing."""
         from collections import Counter
-        from PIL import Image, ImageDraw, ImageFilter
+        from PIL import Image, ImageChops, ImageDraw, ImageFilter
         cache = self.app.__dict__.setdefault('getups', {})
         mine = self.pack[0]['idle'][0][0]
         key = (id(mine), self.px)
@@ -641,7 +641,12 @@ class Pet:
                     widest = max(rows, key=lambda r: (r[1][-1] - r[1][0]) if r[1] else 0)
                     R = (widest[1][-1] - widest[1][0] + 1) / 2 if widest[1] else 10
                     hx0 = (widest[1][-1] + widest[1][0]) / 2 if widest[1] else mine.width / 2
-                    his_head = mine.crop((round(hx0 - R - 1), mt, round(hx0 + R + 1), round(mt + 2 * R + 1)))
+                    # cut a little wide (so the bottom of the ring isn't sliced flat), then trimmed to a circle
+                    m_ = 3
+                    his_head = mine.crop((round(hx0 - R - m_), mt - m_, round(hx0 + R + m_), round(mt + 2 * R + m_)))
+                    ring = Image.new('L', his_head.size, 0)
+                    ImageDraw.Draw(ring).ellipse((m_ - 1.5, m_ - 1.5, his_head.width - m_ + 1.5, his_head.height - m_ + 1.5), fill=255)
+                    his_head.putalpha(ImageChops.multiply(his_head.getchannel('A'), ring))
                     for p_ in seq[1:]:
                         a = p_.getchannel('A')
                         # Yellow's head is a smaller solid disc: find it (the only part thicker than a line), clear
@@ -651,7 +656,7 @@ class Pet:
                         pic = Image.new('RGBA', p_.size, col + (255,))
                         if ib:
                             icx, icy = (ib[0] + ib[2]) / 2, (ib[1] + ib[3]) / 2
-                            rr = (ib[2] - ib[0]) / 2 + w_ + 3  # Yellow's head radius, its soft edge included
+                            rr = (ib[2] - ib[0]) / 2 + w_ + 5  # Yellow's head radius, its soft edge included
                             a = a.copy()
                             ImageDraw.Draw(a).ellipse((icx - rr, icy - rr, icx + rr, icy + rr), fill=0)
                             pic.putalpha(a)
