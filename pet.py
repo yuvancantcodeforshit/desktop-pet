@@ -408,6 +408,8 @@ class Pet:
     def set(self, state, timer=None, leap=False):
         """leap: a throw or a jump (the pack's leap poses in the air); any other fall is a plain drop."""
         self.state, self.timer, self.leap = state, timer or random.randint(40, 200), leap
+        if state == 'sit':  # sitting down at the laptop: a fresh terminal, from the first line
+            self.__dict__.pop('term', None)
         self.since = getattr(self, 'frame', 0)  # pack animations start from their first picture
 
     def land(self, hard=False, full=False):
@@ -900,7 +902,7 @@ class Pet:
 
     def desk_parts(self):
         """His standing picture (facing you) cut into head, body and arms, sat down on crossed legs (drawn in his
-        own yellow and line width), with the laptop on his lap: the silver back of the lid and its scribbled apple.
+        own yellow and line width), turned to the laptop at his right-front (towards the code), hands on its keys.
         Returns (base, head, arms, lid, arm shoulder points, head centre, scale), cached per size."""
         from PIL import Image, ImageDraw
         cache = self.app.__dict__.setdefault('desks', {})
@@ -950,26 +952,35 @@ class Pet:
             legs = big.resize(img.size, Image.LANCZOS)
             lid = Image.new('RGBA', (W * S, H * S), (0, 0, 0, 0))
             d = ImageDraw.Draw(lid)
-            lb, lt, half = b - 6 * k, b - 32 * k, 18 * k  # the lid: on his lap, its back to you, top tipped towards you
-            d.polygon([((cx - half) * S, lb * S), ((cx + half) * S, lb * S), ((cx + half + 2 * k) * S, lt * S),
-                       ((cx - half - 2 * k) * S, lt * S)], fill=(200, 203, 208, 255), outline=(128, 131, 138, 255),
-                      width=round(1.6 * k * S))
-            d.line([((cx - half - 1 * k) * S, (lb + 1.5 * k) * S), ((cx + half + 1 * k) * S, (lb + 1.5 * k) * S)],
-                   fill=(140, 143, 150, 255), width=round(2.4 * k * S))  # the base's front edge
-            ax, ay, white = cx, (lb + lt) / 2, (255, 255, 255, 255)  # the scribbled apple
-            d.ellipse(((ax - 3.4 * k) * S, (ay - 3 * k) * S, (ax + 3.4 * k) * S, (ay + 3.6 * k) * S), fill=white)
-            d.ellipse(((ax + 1.8 * k) * S, (ay - 1.4 * k) * S, (ax + 5.2 * k) * S, (ay + 1.8 * k) * S),
-                      fill=(200, 203, 208, 255))
-            d.polygon([((ax + .2 * k) * S, (ay - 3.2 * k) * S), ((ax + 1.8 * k) * S, (ay - 6 * k) * S),
-                       ((ax + 2.6 * k) * S, (ay - 5.2 * k) * S), ((ax + .8 * k) * S, (ay - 3 * k) * S)], fill=white)
+            P = lambda pts: [(x0 * S, y0 * S) for x0, y0 in pts]
+            silver, edge = (200, 203, 208, 255), (128, 131, 138, 255)
+            # the laptop on his lap, turned to his right-front (towards the code): the keyboard deck in front of him,
+            # the lid rising from its far edge and leaning back, its silver back and scribbled apple towards you
+            deck = [(cx - 4 * k, b - 7 * k), (cx + 18 * k, b - 7 * k), (cx + 26 * k, b - 12 * k), (cx + 4 * k, b - 12 * k)]
+            d.polygon(P(deck), fill=(150, 153, 160, 255), outline=(110, 113, 120, 255), width=round(1.2 * k * S))
+            lidq = [(cx + 4 * k, b - 12 * k), (cx + 26 * k, b - 12 * k), (cx + 32 * k, b - 36 * k), (cx + 10 * k, b - 36 * k)]
+            d.polygon(P(lidq), fill=silver, outline=edge, width=round(1.6 * k * S))
+            d.line(P([lidq[0], lidq[3]]), fill=(160, 200, 240, 255), width=round(1.3 * k * S))  # screen light, his side
+            ax, ay, white = sum(q[0] for q in lidq) / 4, sum(q[1] for q in lidq) / 4, (255, 255, 255, 255)
+            d.ellipse(P([(ax - 3.2 * k, ay - 2.8 * k), (ax + 3.2 * k, ay + 3.4 * k)]), fill=white)  # the apple
+            d.ellipse(P([(ax - 5 * k, ay - 1.4 * k), (ax - 1.8 * k, ay + 1.8 * k)]), fill=silver)  # its bite, facing him
+            d.polygon(P([(ax + .2 * k, ay - 3 * k), (ax + 1.8 * k, ay - 5.8 * k), (ax + 2.6 * k, ay - 5 * k),
+                         (ax + .8 * k, ay - 2.8 * k)]), fill=white)  # its leaf
             lid = lid.resize(img.size, Image.LANCZOS)
             base = Image.new('RGBA', img.size)
             base.alpha_composite(legs)
             base.alpha_composite(body)
             shoulders = []
-            for a in arms:
+            for n, a in enumerate(arms):  # each arm swung from its shoulder so the hand lands on the keys
                 bb = a.getbbox() or (0, 0, 1, 1)
-                shoulders.append(((bb[0] + bb[2]) / 2, bb[1]))
+                sh = ((bb[0] + bb[2]) / 2, bb[1])
+                al = a.getchannel('A').tobytes()
+                pts = [(q % W, q // W) for q in range(len(al)) if al[q] > 128] or [sh]
+                hand = max(pts, key=lambda q: math.dist(q, sh))
+                key_ = (cx + (3 if n == 0 else 13) * k, b - 10 * k)
+                turn = math.degrees(math.atan2(key_[1] - sh[1], key_[0] - sh[0]) - math.atan2(hand[1] - sh[1], hand[0] - sh[0]))
+                arms[n] = a.rotate(-turn, Image.BICUBIC, center=sh)
+                shoulders.append(sh)
             hb = head.getbbox() or (0, 0, 1, 1)
             cache[key] = img, base, head, arms, lid, shoulders, ((hb[0] + hb[2]) / 2, (hb[1] + hb[3]) / 2), k
         return cache[key][1:]
@@ -985,13 +996,13 @@ class Pet:
         im = Image.new('RGBA', (px + 2 * pad, px + top), (0, 0, 0, 0))
         o = pad + (px - base.width) // 2, top + px - base.height
         im.alpha_composite(base, o)
-        for i, (a, sh) in enumerate(zip(arms, shoulders)):  # typing: one arm then the other dips a touch
-            dip = (3 if (t['tap'] and (len(t['cur']) + i) % 2) else 0) * (1 if i else -1)
-            im.alpha_composite(a.rotate(dip, Image.BICUBIC, center=sh), o)
         im.alpha_composite(lid, o)
-        if t['glance']:  # a glance at the code: the head tips towards it, turning on his neck (so it stays on)
+        for i, (a, sh) in enumerate(zip(arms, shoulders)):  # typing: one hand then the other taps a key
+            dip = 3 if (t['tap'] and (len(t['cur']) + i) % 2) else 0
+            im.alpha_composite(a.rotate(dip, Image.BICUBIC, center=sh), o)
+        if t['glance']:  # a glance at the code: a small look up, the head turning on his neck (so it stays on)
             hb = head.getbbox() or (0, 0, 1, 1)
-            im.alpha_composite(head.rotate(-12, Image.BICUBIC, center=((hb[0] + hb[2]) / 2, hb[3])), o)
+            im.alpha_composite(head.rotate(7, Image.BICUBIC, center=((hb[0] + hb[2]) / 2, hb[3])), o)
         else:  # facing his laptop: head straight, where it belongs
             im.alpha_composite(head, o)
         # the terminal: lines above, the one being typed with its underscore, beside and above his head
