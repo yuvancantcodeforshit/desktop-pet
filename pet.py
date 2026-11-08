@@ -43,7 +43,8 @@ THEMES = {
     'Light':    ('#f3f3f3', '#ffffff', '#2f60d8', '#1a1a1a', '#666666'),
 }
 DEFAULTS = {'color': '#7ecf8f', 'speed': 1.0, 'size': 1.0, 'pets': 1, 'monitors': [], 'character': '',
-            'style': 'Blob', 'theme': 'Midnight', 'accent': '', 'font': 'Segoe UI Variable', 'off': [], 'chars': {}}
+            'style': 'Blob', 'theme': 'Midnight', 'accent': '', 'font': 'Segoe UI Variable', 'off': [], 'chars': {},
+            'gravity': 1.0, 'throw': 1.0, 'damping': 1.0, 'spin': 1.0, 'advanced': False}
 # things a pet may do on its own; Settings > Home > Behaviour turns them off (saved in 'off')
 ACTIONS = ('walk', 'run', 'sit', 'lie', 'dance', 'climb', 'chase', 'jump')
 # per-character options (Settings > Characters > Tweaks): saved as settings['chars'][name][key]
@@ -132,6 +133,8 @@ def load_settings(path=None):
         'accent': lambda v: v == '' or is_hex(v),
         'font': lambda v: isinstance(v, str) and 0 < len(v) <= 60,
         'off': lambda v: isinstance(v, list) and all(a in ACTIONS for a in v),
+        'gravity': num(0.5, 2), 'throw': num(0.3, 2), 'damping': num(0.4, 3), 'spin': num(0, 2),  # Settings > Physics
+        'advanced': lambda v: isinstance(v, bool),
     }
     for k, ok in checks.items():
         if k in saved and ok(saved[k]):
@@ -585,13 +588,13 @@ class Pet:
             a = 1 - math.exp(-dt / 0.04)  # smooth the pointer: mouse moves arrive in uneven jumps
             vx = self.pv[0] + ((mx - self.pm[0]) / dt - self.pv[0]) * a
             vy = self.pv[1] + ((my - self.pm[1]) / dt - self.pv[1]) * a
-            g, length = GRAVITY / STEP ** 2, self.px * 0.6  # px/s^2; pivot to the body's swing centre
+            g, length = self.g / STEP ** 2, self.px * 0.6  # px/s^2; pivot to the body's swing centre
             # a flick swings it hard (whirl the pointer to swing it right round); a jump of the pointer can't
             ax, ay = (max(-6 * g, min(6 * g, (v - p) / dt)) for v, p in zip((vx, vy), self.pv))
             self.pv, self.pm = (vx, vy), (mx, my)
             n = max(1, int(dt / 0.004))  # small sub-steps keep the swing stable
             for _ in range(n):
-                al = (-(g - ay) * math.sin(self.th) - ax * math.cos(self.th)) / length - 2.5 * self.om
+                al = (-(g - ay) * math.sin(self.th) - ax * math.cos(self.th)) / length - 2.5 * self.app.settings['damping'] * self.om
                 self.om += al * dt / n
                 self.th = (self.th + self.om * dt / n + math.pi) % (2 * math.pi) - math.pi  # can go right round
             # held still a while: kicks to get free now and then (the swing then plays out on its own)
@@ -616,12 +619,15 @@ class Pet:
         dt = max(t1 - t0, 1 / 60)
         if time.perf_counter() - t1 > 0.08:  # held still before letting go: just drop
             x1, y1 = x0, y0
-        self.vx = max(-25, min(25, (x1 - x0) / dt * STEP))  # px per movement step
-        self.vy = max(-25, min(25, (y1 - y0) / dt * STEP))
+        k = self.app.settings['throw']  # Throw power slider
+        lim = 25 * max(1, k)
+        self.vx = max(-lim, min(lim, (x1 - x0) / dt * STEP * k))  # px per movement step
+        self.vy = max(-lim, min(lim, (y1 - y0) / dt * STEP * k))
         # let go: keeps its swing as spin, and a throw rolls it the way it was thrown (right: clockwise)
         self.spin = math.degrees(self.th) + (180 if self.state == 'hang' else 0)
         self.spin_v = max(-25, min(25, math.degrees(self.om) * STEP - self.vx * (0.6 if self.state == 'hang' else 0.3)))
-        thrown = math.hypot(self.vx, self.vy) > 4
+        self.spin_v *= self.app.settings['spin']  # Spin speed slider
+        thrown = math.hypot(self.vx, self.vy) / k > 4
         if not thrown:  # let go without a throw: a plain, upright drop
             self.spin = self.spin_v = 0
         self.update_area()  # dropped on another monitor: live there
@@ -636,6 +642,11 @@ class Pet:
         self.area = L, T, R, B = random.choice(self.app.allowed_areas())
         self.x, self.y = random.randint(L, max(L, R - self.px)), T
         self.set('fall')
+
+    @property
+    def g(self):
+        """Gravity per step: the built-in value times the Gravity slider."""
+        return GRAVITY * self.app.settings['gravity']
 
     def opt(self, key):
         return char_opt(self.app.settings, self.app.settings['character'], key)
@@ -681,9 +692,9 @@ class Pet:
             # a plain drop falls at a steady 10 px a step; throws keep gravity, and so do these characters
             # (by name), always
             if not self.leap and self.vy >= 0 and self.opt('fall') == 'steady':
-                self.vy = min(self.vy + GRAVITY, 10)
+                self.vy = min(self.vy + self.g, 10)
             else:
-                self.vy += GRAVITY
+                self.vy += self.g
             if staff:  # sparkles fly off the gem, left behind as he comes down
                 self.sparks = [[x + vx, y + vy, vx, vy, life - 1] for x, y, vx, vy, life in self.sparks if life > 1]
                 if self.opt('sparkles') and random.random() < 0.7:  # x is away from the rider (the side is set when drawn), y is up
@@ -707,7 +718,7 @@ class Pet:
                 # free fall reaches over that drop) = a crash; never off the staff
                 back = abs(self.spin) > 120 and self.app.pack and 'lie' in self.app.pack[0]
                 tdl = self.app.pack and not self.leap and self.app.settings['character'] == 'TDL'  # by name
-                hard = not (staff or tdl) and (self.vy > (2 * GRAVITY * self.opt('crash')) ** 0.5 or abs(self.spin) > 50)
+                hard = not (staff or tdl) and (self.vy > (2 * self.g * self.opt('crash')) ** 0.5 or abs(self.spin) > 50)
                 self.sparks = []
                 self.vx, self.vy, self.spin, self.spin_v = 0, 0, 0, 0
                 if back:
@@ -720,7 +731,7 @@ class Pet:
         elif s == 'crash':  # face down after a hard landing: a little hop off the floor, then lies still
             if self.vy:
                 self.y += self.vy
-                self.vy += GRAVITY
+                self.vy += self.g
                 if self.y >= floor:
                     self.y, self.vy = floor, 0
             if self.timer <= 0:
@@ -774,8 +785,8 @@ class Pet:
         if move == 'jump':  # leap up onto the active window's top edge
             h = self.y + self.px - w[2]
             if 0 < h < 700:
-                self.vy = -((2 * GRAVITY * (h + 30)) ** 0.5)
-                t = (-self.vy + max(0, self.vy ** 2 - 2 * GRAVITY * h) ** 0.5) / GRAVITY
+                self.vy = -((2 * self.g * (h + 30)) ** 0.5)
+                t = (-self.vy + max(0, self.vy ** 2 - 2 * self.g * h) ** 0.5) / self.g
                 target = min(max(cx, w[1] + self.px, L + self.px), w[3] - self.px, R - self.px)
                 self.vx = max(-25, min(25, (target - cx) / max(t, 1)))
                 self.set('fall', leap=True)
@@ -1792,6 +1803,12 @@ def selftest():
         panel.set_opt('Yellow', 'crash', None)
         assert 'Yellow' not in load_settings()['chars']
         panel.pick_subtab('characters', 'Characters')
+        panel.change('gravity', 2.0)
+        assert p.g == 2 * GRAVITY
+        panel.change('gravity', 1.0)
+        save_settings(dict(app.settings, throw=99, damping='x', advanced=1))
+        assert load_settings()['throw'] == 1.0 and load_settings()['damping'] == 1.0 and not load_settings()['advanced']
+        app.apply()
         panel.show_tab('home')
         panel.spawn()  # clicking the character on Home
         assert len(app.pets) == 4 and load_settings()['pets'] == 4
