@@ -615,6 +615,8 @@ class Pet:
 
     # --- behaviour ---
     def step(self):
+        if self.state == 'sit' and self.app.pack and self.app.settings['character'] == 'Yellow':
+            self.term_step()
         L, T, R, B = self.area
         px, speed = self.px, self.app.settings['speed']
         floor, s = B - px, self.state
@@ -738,8 +740,8 @@ class Pet:
                 self.set('fall', leap=True)
                 return
             move = 'idle'
-        # Yellow (by name) stays a while at his laptop: long enough to sit, lie back, sit up (5 s each)
-        self.set(move, random.randint(320, 620) if move == 'sit' and self.app.settings['character'] == 'Yellow' else None)
+        # Yellow (by name) codes on his laptop for 30-50 s (until picked up)
+        self.set(move, random.randint(900, 1500) if move == 'sit' and self.app.settings['character'] == 'Yellow' else None)
         if move in ('walk', 'run'):
             self.dir = random.choice((-1, 1))
 
@@ -796,25 +798,6 @@ class Pet:
             seq = pair[1] if d < 0 else pair[0]
             i = int((f - self.since) * fps / 30)
             img = seq[min(i, len(seq) - 1) if s in ONCE else i % len(seq)]
-            if s == 'sit' and self.app.settings['character'] == 'Yellow':  # shortcut: Yellow's laptop, by name
-                # now and then he lies back with it (his lie picture, knees up), then sits up again; the
-                # screen's light flickers now and then
-                lying = (f - self.since) // 150 % 2 == 1 and 'lie' in frames
-                glow = int((f // 4 * 2654435761) >> 7) % 4 == 0
-                cache = self.app.__dict__.setdefault('laptops', {})
-                key = (id(img), lying, glow)
-                if cache.get(key, (None,))[0] is not img:  # keyed by the picture itself (ids get reused)
-                    out, x0 = with_laptop(img, False, glow)
-                    if lying:  # lies down with his knees towards the laptop, which stays exactly where it was
-                        from PIL import Image
-                        lie = min(frames['lie'][0][0], frames['lie'][1][0],
-                                  key=lambda p: abs(with_laptop(p, True)[1] - x0) if (with_laptop(p, True)[1] > 0) == (x0 > 0) else 1e9)
-                        lout, lx0 = with_laptop(lie, True, glow)
-                        shift = round(x0 - lx0)
-                        out = Image.new('RGBA', (lout.width + 2 * abs(shift), lout.height), (0, 0, 0, 0))
-                        out.alpha_composite(lout, (abs(shift) + shift, 0))
-                    cache[key] = img, out
-                img = cache[key][1]
             return img
         step = 0
         if s in ('walk', 'climb', 'ceiling', 'run', 'chase', 'dance', 'hang'):
@@ -829,6 +812,8 @@ class Pet:
         if not self.win.isVisible():
             return
         img = self.picture()
+        if self.state == 'sit' and self.app.pack and self.app.settings['character'] == 'Yellow':
+            return self.draw_desk(x, y)
         if self.state == 'fall' and self.app.pack and not self.leap and self.app.settings['character'] == 'Yellow':
             return self.draw_staff(img, x, y)
         top = self.state == 'ceiling'  # hanging: picture hugs the top edge, not the floor
@@ -862,6 +847,174 @@ class Pet:
         data, w, h, dx, dy = shown
         show_layered(self.win.hwnd, data, w, h, round(self.x if x is None else x) + dx,
                      round(self.y if y is None else y) + dy)
+
+    # --- Yellow at his laptop (by name): facing you, cross-legged, coding in a little terminal by his head ---
+    CODE = (('print("Hello World")', 'Hello World'), ('x = 5', None), ('y = x * 2', None), ('print(y)', '10'),
+            ('name = "Yellow"', None), ('print("Hi " + name)', 'Hi Yellow'), ('for i in range(3):', None),
+            ('    print(i)', '0 1 2'), ('import random', None), ('print(random.randint(1, 6))', '4'))
+    KEYS = 'qwertyuiopasdfghjklzxcvbnm'
+
+    def term_step(self):
+        """One 1/30 s step of his typing: a character at an uneven pace (slower after spaces and symbols),
+        now and then a wrong key he notices and backspaces, Enter at the end of a line (with its output), short
+        breaks between lines, and every few seconds a glance up at what he has typed."""
+        t = self.__dict__.setdefault('term', {'lines': [], 'cur': '', 'todo': [], 'wait': 20, 'n': 0,
+                                               'glance': 0, 'next_glance': random.randint(90, 180), 'tap': 0,
+                                               'idle': 0})
+        t['tap'] = max(0, t['tap'] - 1)
+        t['idle'] += 1
+        if t['glance']:
+            t['glance'] -= 1
+            return
+        t['next_glance'] -= 1
+        if t['next_glance'] <= 0:  # looks up at the code for a moment, then back down at the laptop
+            t['glance'], t['next_glance'] = random.randint(18, 30), random.randint(110, 200)
+            return
+        if t['wait'] > 0:
+            t['wait'] -= 1
+            return
+        if not t['todo']:  # next line: plan the keystrokes, with the odd typo fixed straight away
+            code, out = self.CODE[t['n'] % len(self.CODE)]
+            t['n'] += 1
+            for ch in code:
+                if ch.isalpha() and random.random() < 0.05:
+                    t['todo'] += [('key', random.choice(self.KEYS)), ('wait', random.randint(5, 10)), ('back', None)]
+                t['todo'].append(('key', ch))
+            t['todo'].append(('enter', out))
+        act, val = t['todo'].pop(0)
+        if act == 'wait':
+            t['wait'] = val
+            return
+        if act == 'key':
+            t['cur'] += val
+            t['wait'] = random.randint(2, 5) + (random.randint(2, 6) if val in ' ("=:.+' else 0)
+        elif act == 'back':
+            t['cur'] = t['cur'][:-1]
+            t['wait'] = random.randint(3, 6)
+        else:  # Enter: the line moves up, its output under it
+            t['lines'] += ['> ' + t['cur']] + ([val] if val else [])
+            t['lines'] = t['lines'][-3:]
+            t['cur'] = ''
+            t['wait'] = random.randint(25, 50)
+        t['tap'], t['idle'] = 2, 0
+
+    def desk_parts(self):
+        """His standing picture (facing you) cut into head, body and arms, sat down on crossed legs (drawn in his
+        own yellow and line width), with the laptop on his lap: the silver back of the lid and its scribbled apple.
+        Returns (base, head, arms, lid, arm shoulder points, head centre, scale), cached per size."""
+        from PIL import Image, ImageDraw
+        cache = self.app.__dict__.setdefault('desks', {})
+        img = self.app.pack[0]['idle'][0][0]
+        key = (id(img), self.px)
+        if cache.get(key, (None,))[0] is not img:  # keyed by the picture itself (ids get reused)
+            k, W, H = img.width / 128, img.width, img.height
+            l, t, r, b = img.getbbox() or (0, 0, W, H)
+            h, cx = b - t, (l + r) / 2
+            neck, hip = t + 0.21 * h, t + 0.53 * h
+            seat = b - 9 * k
+            dy = round(seat - hip)  # sat down: everything above the hips drops by this
+            src = img.load()
+            head, body = Image.new('RGBA', img.size), Image.new('RGBA', img.size)
+            arms = [Image.new('RGBA', img.size), Image.new('RGBA', img.size)]
+            for yy in range(int(t), int(hip) + 1):
+                for xx in range(W):
+                    c = src[xx, yy]
+                    if not c[3] or yy + dy >= H:
+                        continue
+                    if yy < neck:
+                        head.putpixel((xx, yy + dy), c)
+                    elif abs(xx - cx) <= 3.5 * k:
+                        body.putpixel((xx, yy + dy), c)
+                    else:
+                        arms[0 if xx < cx else 1].putpixel((xx, yy + dy), c)
+            col = (255, 197, 0, 255)
+            for yy in range(int(neck), int(hip)):  # his own yellow, from the middle of his body
+                c = src[round(cx), yy]
+                if c[3] == 255:
+                    col = c
+                    break
+            S = 4  # legs and laptop drawn 4x, shrunk for smooth edges
+            big = Image.new('RGBA', (W * S, H * S), (0, 0, 0, 0))
+            d = ImageDraw.Draw(big)
+
+            def stroke(p, q, w=6 * k):
+                d.line([(p[0] * S, p[1] * S), (q[0] * S, q[1] * S)], fill=col, width=round(w * S))
+                for x0, y0 in (p, q):
+                    d.ellipse(((x0 - w / 2) * S, (y0 - w / 2) * S, (x0 + w / 2) * S, (y0 + w / 2) * S), fill=col)
+            hp = (cx, seat)
+            k1, k2 = (cx - 23 * k, b - 5 * k), (cx + 23 * k, b - 5 * k)  # knees out to the sides
+            stroke(hp, k1)
+            stroke(hp, k2)
+            stroke(k1, (cx + 9 * k, b - 3 * k))  # shins crossing in front
+            stroke(k2, (cx - 9 * k, b - 3 * k))
+            legs = big.resize(img.size, Image.LANCZOS)
+            lid = Image.new('RGBA', (W * S, H * S), (0, 0, 0, 0))
+            d = ImageDraw.Draw(lid)
+            lb, lt, half = b - 6 * k, b - 32 * k, 18 * k  # the lid: on his lap, its back to you, top tipped towards you
+            d.polygon([((cx - half) * S, lb * S), ((cx + half) * S, lb * S), ((cx + half + 2 * k) * S, lt * S),
+                       ((cx - half - 2 * k) * S, lt * S)], fill=(200, 203, 208, 255), outline=(128, 131, 138, 255),
+                      width=round(1.6 * k * S))
+            d.line([((cx - half - 1 * k) * S, (lb + 1.5 * k) * S), ((cx + half + 1 * k) * S, (lb + 1.5 * k) * S)],
+                   fill=(140, 143, 150, 255), width=round(2.4 * k * S))  # the base's front edge
+            ax, ay, white = cx, (lb + lt) / 2, (255, 255, 255, 255)  # the scribbled apple
+            d.ellipse(((ax - 3.4 * k) * S, (ay - 3 * k) * S, (ax + 3.4 * k) * S, (ay + 3.6 * k) * S), fill=white)
+            d.ellipse(((ax + 1.8 * k) * S, (ay - 1.4 * k) * S, (ax + 5.2 * k) * S, (ay + 1.8 * k) * S),
+                      fill=(200, 203, 208, 255))
+            d.polygon([((ax + .2 * k) * S, (ay - 3.2 * k) * S), ((ax + 1.8 * k) * S, (ay - 6 * k) * S),
+                       ((ax + 2.6 * k) * S, (ay - 5.2 * k) * S), ((ax + .8 * k) * S, (ay - 3 * k) * S)], fill=white)
+            lid = lid.resize(img.size, Image.LANCZOS)
+            base = Image.new('RGBA', img.size)
+            base.alpha_composite(legs)
+            base.alpha_composite(body)
+            shoulders = []
+            for a in arms:
+                bb = a.getbbox() or (0, 0, 1, 1)
+                shoulders.append(((bb[0] + bb[2]) / 2, bb[1]))
+            hb = head.getbbox() or (0, 0, 1, 1)
+            cache[key] = img, base, head, arms, lid, shoulders, ((hb[0] + hb[2]) / 2, (hb[1] + hb[3]) / 2), k
+        return cache[key][1:]
+
+    def draw_desk(self, x, y):
+        """Yellow at his laptop: arms bob as he types, head down at the laptop or glancing up at his code,
+        which appears in a little terminal by his head (a blinking underscore when he stops)."""
+        from PIL import Image, ImageDraw, ImageFont
+        base, head, arms, lid, shoulders, (hx, hy), k = self.desk_parts()
+        t = self.__dict__.get('term') or {'lines': [], 'cur': '', 'tap': 0, 'glance': 0, 'idle': 0}
+        px = self.px
+        pad, top = px * 2, px // 2  # room to the right for the code, and above for its lines
+        im = Image.new('RGBA', (px + 2 * pad, px + top), (0, 0, 0, 0))
+        o = pad + (px - base.width) // 2, top + px - base.height
+        im.alpha_composite(base, o)
+        for i, (a, sh) in enumerate(zip(arms, shoulders)):  # typing: one arm then the other dips a touch
+            dip = (3 if (t['tap'] and (len(t['cur']) + i) % 2) else 0) * (1 if i else -1)
+            im.alpha_composite(a.rotate(dip, Image.BICUBIC, center=sh), o)
+        im.alpha_composite(lid, o)
+        if t['glance']:  # a glance at the code: the head tips towards it, turning on his neck (so it stays on)
+            hb = head.getbbox() or (0, 0, 1, 1)
+            im.alpha_composite(head.rotate(-12, Image.BICUBIC, center=((hb[0] + hb[2]) / 2, hb[3])), o)
+        else:  # facing his laptop: head straight, where it belongs
+            im.alpha_composite(head, o)
+        # the terminal: lines above, the one being typed with its underscore, beside and above his head
+        font = self.app.__dict__.get('term_font')
+        if font is None:
+            try:
+                font = ImageFont.truetype('consola.ttf', max(9, round(10.2 * k)))
+            except OSError:
+                font = ImageFont.load_default()
+            self.app.term_font = font
+        d = ImageDraw.Draw(im)
+        lh = round(13.2 * k)
+        tx, ty = o[0] + hx + 15 * k, o[1] + hy - 24 * k
+        blink = t['idle'] < 12 or (self.frame // 15) % 2 == 0
+        for n, line in enumerate(t['lines']):
+            d.text((tx, ty - (len(t['lines']) - n) * lh), line, font=font,
+                   fill=(235, 235, 235, 255) if line.startswith('> ') else (150, 220, 150, 255))
+        cur = '> ' + t['cur']
+        d.text((tx, ty), cur, font=font, fill=(235, 235, 235, 255))
+        if blink:
+            d.text((tx + d.textlength(cur, font=font), ty), '_', font=font, fill=(255, 255, 255, 255))
+        show_layered(self.win.hwnd, im.convert('RGBa').tobytes('raw', 'BGRa'), im.width, im.height,
+                     round(self.x if x is None else x) - pad, round(self.y if y is None else y) - top)
 
     def draw_staff(self, img, x, y):
         """Yellow riding his staff down: his fall picture as drawn, with sparkles streaming off the gem."""
@@ -911,64 +1064,6 @@ def staff_ends(img):
 def pet_px(settings):
     """On-screen pet size in pixels: base size x size setting x display scaling."""
     return int(SIZE * settings['size'] * DPI_SCALE)
-
-
-def with_laptop(img, lying=False, glow=False):
-    """Yellow's laptop on the floor beside the picture, lid open towards his face: a flat silver lid with a grey
-    edge and a scribbled white apple logo, seen from behind, the screen's light on his side (brighter when glow).
-    Sitting: just in front of his knees, under his hands. Lying back (the lie picture, knees up): past his knees.
-    The picture comes back wider, the figure still in the middle, so the laptop is never cut off."""
-    from PIL import Image, ImageDraw
-    a = img.getchannel('A')
-    l, t, r, b = a.getbbox() or (0, 0, img.width, img.height)
-    h = b - t
-
-    def mid_x(y0, y1):  # middle of the solid pixels in these rows
-        xs = [x for y in range(int(y0), int(y1)) for x in range(l, r) if a.getpixel((x, y)) > 128]
-        return sum(xs) / len(xs) if xs else (l + r) / 2
-
-    if lying:  # the laptop goes on the side of his raised knees (the highest part)
-        face = 1 if mid_x(t, t + h * 0.35) > (l + r) / 2 else -1
-    else:  # sitting: on the side his knees stick out (knees vs head)
-        face = -1 if mid_x(t + h * 0.45, t + h * 0.75) < mid_x(t, t + h * 0.3) else 1
-    k, u = 4, img.width / 128  # drawn 4x then shrunk for smooth edges; u: 1/128 of the picture
-    w, tall, lean = 44 * u, 26 * u, 8 * u  # laptop width, lid height, how far the lid leans back
-    pad = int(w + 8 * u)  # room on both sides
-    if lying:
-        x0 = (r + 3 * u) if face > 0 else (l - 3 * u - w)
-    else:
-        x0 = (l + 3 * u - w) if face < 0 else (r - 3 * u)
-    x0 += pad
-    W = img.width + 2 * pad
-    big = Image.new('RGBA', (W * k, img.height * k), (0, 0, 0, 0))
-    d = ImageDraw.Draw(big)
-
-    def at(x, y):
-        return (x * k, y * k)
-
-    def poly(pts, fill, outline=None, width=1.2):
-        d.polygon([at(x, y) for x, y in pts], fill=fill, outline=outline, width=max(1, int(u * k * width)))
-
-    f = -face if not lying else face  # the lid leans away from his face
-    bx = lambda dx: x0 + (dx if (face < 0) != lying else w - dx)  # dx measured from the end away from him
-    poly([(bx(0), b), (bx(w), b), (bx(w - 2 * u), b - 3 * u), (bx(2 * u), b - 3 * u)], (150, 153, 160, 255),
-         (110, 113, 120, 255), 0.8)
-    top = b - 3 * u - tall
-    lid = [(bx(3 * u), b - 3 * u), (bx(w - 4 * u), b - 3 * u), (bx(w - 4 * u) + f * lean, top), (bx(3 * u) + f * lean, top)]
-    poly(lid, (200, 203, 208, 255), (128, 131, 138, 255), 1.6)
-    sx, sy = sum(p[0] for p in lid) / 4, sum(p[1] for p in lid) / 4
-    # the logo, scribbled like in the video: a white apple blob with a bite out of one side and a tilted leaf
-    lidc, white = (200, 203, 208, 255), (255, 255, 255, 255)
-    d.ellipse((*at(sx - 3 * u, sy - 2.6 * u), *at(sx + 3 * u, sy + 3.2 * u)), fill=white)
-    bite = sx + face * 3.1 * u  # the bite faces him
-    d.ellipse((*at(bite - 1.6 * u, sy - 1.2 * u), *at(bite + 1.6 * u, sy + 1.6 * u)), fill=lidc)
-    d.polygon([at(sx + 0.2 * u, sy - 2.8 * u), at(sx + 1.6 * u, sy - 5.2 * u), at(sx + 2.4 * u, sy - 4.4 * u),
-               at(sx + 0.8 * u, sy - 2.6 * u)], fill=white)  # the leaf
-    light = (215, 240, 255, 255) if glow else (160, 200, 240, 255)  # the screen's light, on his side
-    d.line([at(*lid[1]), at(*lid[2])], fill=light, width=max(1, int(u * k * 1.3)))
-    out = big.resize((W, img.height), Image.LANCZOS)
-    out.alpha_composite(img, (pad, 0))
-    return out, x0 - W / 2  # and where the laptop starts, from the picture's middle
 
 
 def unstretched(img, app):
