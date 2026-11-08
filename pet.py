@@ -54,7 +54,7 @@ THEMES = {
 }
 DEFAULTS = {'color': '#7ecf8f', 'speed': 1.0, 'size': 1.0, 'pets': 1, 'monitors': [], 'character': '',
             'style': 'Blob', 'theme': 'Midnight', 'accent': '', 'font': 'Segoe UI Variable', 'off': [], 'chars': {},
-            'gravity': 1.0, 'throw': 1.0, 'damping': 1.0, 'spin': 1.0, 'advanced': False, 'schedule': {'on': False, 'from': 22, 'to': 7}}
+            'gravity': 1.0, 'throw': 1.0, 'damping': 1.0, 'spin': 1.0, 'advanced': False, 'schedule': {'on': False, 'from': 22, 'to': 7}, 'roster': {'': 1}}
 # things a pet may do on its own; Settings > Home > Behaviour turns them off (saved in 'off')
 ACTIONS = ('walk', 'run', 'sit', 'lie', 'dance', 'climb', 'chase', 'jump')
 # per-character options (Settings > Characters > Tweaks): saved as settings['chars'][name][key]
@@ -115,6 +115,35 @@ def mood(s, hour=None):
     night = h >= a or h < b if a > b else a <= h < b
     return 'night' if night else 'day'
 
+# who is on the desk: settings['roster'] = {character: how many}; '' is the default blob
+def clean_roster(v, character, pets):
+    """Valid entries only, 10 pets at most. Settings from before multi-character derive it from character + pets."""
+    name_ok = lambda k: isinstance(k, str) and (k == '' or re.fullmatch(r'[\w\- ]{1,40}', k))
+    if not isinstance(v, dict):
+        return {character: pets} if pets else {}
+    out, room = {}, 10
+    for k, n in v.items():
+        if name_ok(k) and isinstance(n, int) and not isinstance(n, bool) and n > 0 and room > 0:
+            out[k] = min(n, room)
+            room -= out[k]
+    return out
+
+
+def set_total(s, total):
+    """Home's Pets stepper: the main character gains pets first and loses them first, then the others."""
+    r, main = dict(s['roster']), s['character']
+    total = max(0, min(10, total))
+    cur = sum(r.values())
+    if total > cur:
+        r[main] = r.get(main, 0) + total - cur
+    else:
+        for ch in [main] + [k for k in reversed(list(r)) if k != main]:
+            take = min(r.get(ch, 0), cur - total)
+            r[ch] = r.get(ch, 0) - take
+            cur -= take
+    s['roster'] = {k: v for k, v in r.items() if v > 0}
+    s['pets'] = sum(s['roster'].values())
+
 RUN_KEY = r'Software\Microsoft\Windows\CurrentVersion\Run'
 # app icon; bundled next to the code (PyInstaller unpacks data files into sys._MEIPASS)
 LOGO = os.path.join(getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__))), 'logo.ico')
@@ -151,7 +180,7 @@ def is_hex(v):
 
 def load_settings(path=None):
     """Saved settings over defaults. Anything missing, mistyped or out of range falls back to its default."""
-    s = dict(DEFAULTS, chars={}, schedule=clean_schedule(None))
+    s = dict(DEFAULTS, chars={}, schedule=clean_schedule(None), roster=dict(DEFAULTS['roster']))
     try:
         with open(path or SETTINGS_FILE, encoding='utf-8') as f:
             saved = json.load(f)
@@ -181,7 +210,8 @@ def load_settings(path=None):
     s['schedule'] = clean_schedule(saved.get('schedule'))
     if saved.get('character') is True:  # v1.0.3 kept one custom image; it becomes a pack at startup
         s['character'] = '__migrate__'
-    s['pets'] = int(s['pets'])
+    s['roster'] = clean_roster(saved.get('roster'), s['character'], int(s['pets']))
+    s['pets'] = sum(s['roster'].values())
     return s
 
 
@@ -456,8 +486,8 @@ class PetWidget(QWidget):
 
 
 class Pet:
-    def __init__(self, app):
-        self.app, self.alive = app, True
+    def __init__(self, app, char=''):
+        self.app, self.alive, self.char = app, True, char  # char: its character pack's name, '' = blob
         self.win = PetWidget(self)
         self.shown = {}  # picture -> its prepared bytes
         self.resize()
@@ -489,14 +519,14 @@ class Pet:
         """Touched down. Packs: a soft landing plays the second half of the landing animation (crouch, stand); a
         hard one crashes face down (its first picture) with a tiny hop, lies a moment, then plays all of it (crawl
         up, stand). full: all of it now. Blob: quick squash."""
-        frames = self.app.pack[0] if self.app.pack else None
+        frames = self.pack[0] if self.pack else None
         if frames is None:
             self.set('land', 6)
         elif hard and 'land' in frames:
             self.set('crash', 22)
             self.vy = -3.5  # the body thumps the floor and lifts a few px
         elif 'land' in frames:
-            ticks = round(len(frames['land'][0]) * 30 / self.app.pack[1])
+            ticks = round(len(frames['land'][0]) * 30 / self.pack[1])
             skip = 0 if full else ticks // 2
             self.set('land', max(1, ticks - skip))
             self.since = self.frame - skip  # start partway through
@@ -504,7 +534,8 @@ class Pet:
             self.set('idle')
 
     def resize(self):
-        self.px = int(pet_px(self.app.settings) * (self.app.pack_scale if self.app.pack else 1))
+        self.pack, self.pack_scale = self.app.get_pack(self.char)
+        self.px = int(pet_px(self.app.settings) * (self.pack_scale if self.pack else 1))
         self.shown.clear()
 
     # --- mouse (screen pixels from Windows, the same units as the pet's position) ---
@@ -527,7 +558,7 @@ class Pet:
         self.pose = None  # (picture, when picked) while held by the hand
         self.set('hang' if leg else 'drag')
         px = self.px
-        if not self.app.pack:  # the blob's held foot and raised hand are drawn at known spots (64 px grid)
+        if not self.pack:  # the blob's held foot and raised hand are drawn at known spots (64 px grid)
             self.hx, self.hy = px / 2, px * (5 if leg else 4) / 64
         elif not leg:
             self.held_pose()
@@ -579,7 +610,7 @@ class Pet:
         """Held by the leg: the pack's monkey-bar frames that hang from a raised arm, turned upside down, so an
         arm hangs and the free leg angles off the held one. The swing picks among them (choppy on purpose): one
         end of the row swinging one way, the other end the other way, the middle hanging still."""
-        frames = self.app.pack[0]
+        frames = self.pack[0]
         side = 1 if self.dir < 0 else 0
         pics = [p for p in {id(p): p for p in frames.get('ceiling', ([], []))[side]}.values() if self.grip(p)[3]]
         pics = pics or [frames['drag'][side][0]]
@@ -590,7 +621,7 @@ class Pet:
         if getattr(self, 'lpose', None) is None or (best is not self.lpose[0] and now - self.lpose[1] > 0.12):
             self.lpose = best, now
         img = self.lpose[0]
-        if self.app.settings['character'] == 'TCO':  # shortcut, by name: the fire from his held picture's hand
+        if self.char == 'TCO':  # shortcut, by name: the fire from his held picture's hand
             img = with_hand_fire(img, frames['drag'][side][0], self)
         self.hx, self.hy = self.foot(img)
         self.lean = 0.0
@@ -600,7 +631,7 @@ class Pet:
         """Held by the hand: the pack's monkey-bar frames (swing) show its body at many angles under one raised
         hand, so show the one nearest the real swing angle (turning only the rest), facing the way it swings.
         Hanging still: the plain held picture (pinch). Sets the picture's hand tip as the grip."""
-        frames = self.app.pack[0]
+        frames = self.pack[0]
         if abs(self.om) > 1.5:  # swinging hard one way: faces that way
             self.dir = 1 if self.om > 0 else -1
         side = 1 if self.dir < 0 else 0
@@ -641,9 +672,9 @@ class Pet:
             if self.calm > 1.5 and random.random() < dt * 0.7:
                 self.om += random.choice((-1, 1)) * random.uniform(1.5, 2.5)
                 self.calm = 0.0
-        if self.state == 'drag' and self.app.pack:
+        if self.state == 'drag' and self.pack:
             self.held_pose()
-        elif self.state == 'hang' and self.app.pack:
+        elif self.state == 'hang' and self.pack:
             self.leg_pose()
         self.x, self.y = self.prev = mx - self.hx, my - self.hy
 
@@ -688,11 +719,11 @@ class Pet:
         return GRAVITY * self.app.settings['gravity']
 
     def opt(self, key):
-        return char_opt(self.app.settings, self.app.settings['character'], key)
+        return char_opt(self.app.settings, self.char, key)
 
     def laptop(self):
         """Yellow sits and codes at his laptop (Tweaks can turn that off)."""
-        return bool(self.app.pack) and self.app.settings['character'] == 'Yellow' and self.opt('laptop')
+        return bool(self.pack) and self.char == 'Yellow' and self.opt('laptop')
 
     def menu(self):
         m = QMenu()
@@ -727,7 +758,7 @@ class Pet:
         if s == 'fall':
             bottom = self.y + px
             # shortcut: Yellow's fall pictures ride a staff, by name: sparkles fly off it, and he always lands softly
-            staff = self.app.pack and not self.leap and self.app.settings['character'] == 'Yellow'
+            staff = self.pack and not self.leap and self.char == 'Yellow'
             # a plain drop falls at a steady 10 px a step; throws keep gravity, and so do these characters
             # (by name), always
             if not self.leap and self.vy >= 0 and self.opt('fall') == 'steady':
@@ -755,8 +786,8 @@ class Pet:
                 self.y = floor
                 # how it meets the floor: upside down = on its back; sideways or from high up (the crash height, 600 px by default: the speed a
                 # free fall reaches over that drop) = a crash; never off the staff
-                back = abs(self.spin) > 120 and self.app.pack and 'lie' in self.app.pack[0]
-                tdl = self.app.pack and not self.leap and self.app.settings['character'] == 'TDL'  # by name
+                back = abs(self.spin) > 120 and self.pack and 'lie' in self.pack[0]
+                tdl = self.pack and not self.leap and self.char == 'TDL'  # by name
                 hard = not (staff or tdl) and (self.vy > (2 * self.g * self.opt('crash')) ** 0.5 or abs(self.spin) > 50)
                 self.sparks = []
                 self.vx, self.vy, self.spin, self.spin_v = 0, 0, 0, 0
@@ -867,17 +898,17 @@ class Pet:
     def picture(self):
         """This tick's PIL picture of the pet."""
         d, f, s = self.dir, self.frame, self.state
-        if s == 'hang' and self.app.pack:  # held by the leg: a pack's struggle animation, turned upside down when drawn
+        if s == 'hang' and self.pack:  # held by the leg: a pack's struggle animation, turned upside down when drawn
             s = 'drag'
         if s == 'dance':  # turn to and fro to the beat
             d = 1 if f // 12 % 2 else -1
-        if self.app.pack:  # character pack: that state's animation (or a stand-in), mirrored when facing left
-            frames, fps = self.app.pack
+        if self.pack:  # character pack: that state's animation (or a stand-in), mirrored when facing left
+            frames, fps = self.pack
             if self.state == 'drag':
                 return self.pose[0] if getattr(self, 'pose', None) else self.held_pose()
             if self.state == 'hang':
                 return self.leg_pose()
-            if (s == 'fall' and not self.leap and self.app.settings['character'] == 'TDL'
+            if (s == 'fall' and not self.leap and self.char == 'TDL'
                     and 'fall' in frames):  # by name: his fall picture is drawn stretched tall; shown at 75% height
                 img = frames['fall'][1 if d < 0 else 0][0]
                 return unstretched(img, self.app)
@@ -907,7 +938,7 @@ class Pet:
         img = self.picture()
         if self.state == 'sit' and self.laptop():
             return self.draw_desk(x, y)
-        if self.state == 'fall' and self.app.pack and not self.leap and self.app.settings['character'] == 'Yellow':
+        if self.state == 'fall' and self.pack and not self.leap and self.char == 'Yellow':
             return self.draw_staff(img, x, y)
         top = self.state == 'ceiling'  # hanging: picture hugs the top edge, not the floor
         hang = self.state == 'hang'
@@ -1005,7 +1036,7 @@ class Pet:
         Returns (base, head, arms, lid, shoulder points, head pivot, head centre, scale k, R), all at 4x."""
         from PIL import Image, ImageDraw
         cache = self.app.__dict__.setdefault('desks', {})
-        src_img = self.app.pack[0]['idle'][0][0]
+        src_img = self.pack[0]['idle'][0][0]
         key = (id(src_img), self.px)
         if cache.get(key, (None,))[0] is not src_img:  # keyed by the picture itself (ids get reused)
             R = 4
@@ -1418,6 +1449,7 @@ class App:
             self.qt.setWindowIcon(QIcon(LOGO))
         self.settings = load_settings()
         self.blob_cache = {}
+        self.pack_cache = {}
         self.migrate_character()
         self.load_character()
         self.pets = []
@@ -1430,10 +1462,12 @@ class App:
         if tray and autostart():
             autostart(True)  # refresh an older login entry so it carries --startup
         if startup:
-            for _ in range(self.settings['pets']):
-                self.add(save=False)
+            for ch, n in list(self.settings['roster'].items()):
+                for _ in range(n):
+                    self.add(ch, save=False)
         else:
             self.settings['pets'] = 0  # in memory only until a pet is sent out; the saved count is for login
+            self.settings['roster'] = {}
         if FROZEN:
             threading.Thread(target=download_update, daemon=True).start()
         self.timers = [self.every(15, self.frame, precise=True), self.every(60_000, self.every_minute),
@@ -1494,24 +1528,33 @@ class App:
             os.makedirs(dest, exist_ok=True)
             shutil.copyfile(CHARACTER_FILE, os.path.join(dest, 'idle.png'))
             self.settings['character'] = 'My image'
+        r = self.settings['roster']
+        if '__migrate__' in r:
+            r[self.settings['character']] = r.get(self.settings['character'], 0) + r.pop('__migrate__')
         save_settings(self.settings)
 
-    def load_character(self):
-        """Load the chosen pack at the current size into self.pack; None means draw the blob."""
-        name = self.settings['character']
+    def get_pack(self, name):
+        """((frames, fps) or None for the blob, the pack's scale) for one character at the current size."""
         path = os.path.join(PACKS_DIR, name)
-        self.pack_scale = packs.scale_of(packs.read_meta(path)) if name and os.path.isdir(path) else 1
-        key = (name, pet_px(self.settings), self.pack_scale)
-        if key == getattr(self, 'pack_key', None):
-            return  # unchanged: sliders call apply() many times per second, don't reload images each time
-        self.pack_key, self.pack = key, None
-        if name and os.path.isdir(path):
-            try:
-                self.pack = packs.load_frames(path, int(pet_px(self.settings) * self.pack_scale))
-            except Exception:
-                self.pack = None  # broken pack: fall back to the blob rather than crash the pets
-            if self.pack and 'idle' not in self.pack[0]:
-                self.pack = None
+        scale = packs.scale_of(packs.read_meta(path)) if name and os.path.isdir(path) else 1
+        key = (name, pet_px(self.settings), scale)
+        if key not in self.pack_cache:  # sliders call apply() many times a second: never reload images needlessly
+            if len(self.pack_cache) > 12:  # the Size slider makes a key per step
+                self.pack_cache.clear()
+            pack = None
+            if name and os.path.isdir(path):
+                try:
+                    pack = packs.load_frames(path, int(pet_px(self.settings) * scale))
+                except Exception:
+                    pack = None  # broken pack: fall back to the blob rather than crash the pets
+                if pack and 'idle' not in pack[0]:
+                    pack = None
+            self.pack_cache[key] = pack
+        return self.pack_cache[key], scale
+
+    def load_character(self):
+        """The main character (Home preview, accent, Add pet): its pack in self.pack; None means the blob."""
+        self.pack, self.pack_scale = self.get_pack(self.settings['character'])
 
     def menu_qss(self):
         from panel import menu_qss  # the menus follow the Settings theme
@@ -1519,16 +1562,23 @@ class App:
 
     def apply(self):
         """Save settings and push them to every pet. The Settings window calls this on each change."""
-        save_settings(self.settings)
         self.load_character()
+        r = self.settings['roster']
+        for ch in [c for c in r if c and not os.path.isdir(os.path.join(PACKS_DIR, c))]:
+            r[''] = r.get('', 0) + r.pop(ch)  # a deleted pack: its pets turn into blobs
+        self.settings['pets'] = sum(r.values())
+        save_settings(self.settings)
         for p in self.pets:
             p.resize()
             p.update_area()
-        target = self.settings['pets']  # remove() rewrites the setting, so hold on to the goal
-        while len(self.pets) < target:
-            self.add(save=False)
-        while len(self.pets) > target:
-            self.remove(self.pets[-1])
+        have = lambda ch: sum(p.char == ch for p in self.pets)
+        for p in reversed(list(self.pets)):  # too many of a character: the newest go
+            if have(p.char) > r.get(p.char, 0):
+                self.remove(p, count=False)
+        for ch, n in r.items():
+            while have(ch) < n:
+                self.add(ch, save=False)
+        self.quit_if_idle()
         if self.tray:
             self.tray.setIcon(QIcon(to_pixmap(logo_image(64, self.settings['color']))))
             self.tray_menu.setStyleSheet(self.menu_qss())
@@ -1584,22 +1634,30 @@ class App:
             p.win.close()
         self.qt.quit()
 
-    def add(self, save=True):
+    def add(self, char=None, save=True):
         if len(self.pets) >= 10:
             return
-        self.pets.append(Pet(self))
+        char = self.settings['character'] if char is None else char
+        self.pets.append(Pet(self, char))
         if save:
-            self.settings['pets'] = len(self.pets)
+            r = self.settings['roster']
+            r[char] = r.get(char, 0) + 1
+            self.settings['pets'] = sum(r.values())
             save_settings(self.settings)
 
-    def remove(self, pet):
+    def remove(self, pet, count=True):
         pet.alive = False
         pet.win.close()
         pet.win.deleteLater()
         self.pets.remove(pet)
-        self.settings['pets'] = len(self.pets)
-        save_settings(self.settings)
-        self.quit_if_idle()
+        if count:  # apply() fixes the roster itself
+            r = self.settings['roster']
+            r[pet.char] = r.get(pet.char, 0) - 1
+            if r[pet.char] <= 0:
+                del r[pet.char]
+            self.settings['pets'] = sum(r.values())
+            save_settings(self.settings)
+            self.quit_if_idle()
 
     def quit_if_idle(self):
         """No pets, no Settings window, no tray icon to come back from: nothing left to show, so exit."""
@@ -1638,7 +1696,7 @@ def check_settings(d):
         with open(path, 'w') as f:
             f.write(junk)
         assert load_settings(path) == DEFAULTS, junk
-    good = dict(DEFAULTS, color='#ff0000', size=2.0, pets=3, monitors=['\\\\.\\DISPLAY2'], character='My cat',
+    good = dict(DEFAULTS, color='#ff0000', size=2.0, pets=3, roster={'My cat': 3}, monitors=['\\\\.\\DISPLAY2'], character='My cat',
                 style='Ghost', theme='Ocean', accent='#123456', font='Bahnschrift')
     save_settings(good, path)
     assert load_settings(path) == good
@@ -1883,8 +1941,18 @@ def selftest():
         assert not app.pets and app.qt is not None
         panel.change('pets', 1)
         p = app.pets[0]
-        panel.change('character', 'Test pet')
-        assert app.pack and len(app.pack[0]['idle'][0]) == 2
+        panel.pick_character('Test pet')  # one pet on the desk: it swaps
+        p = app.pets[0]
+        assert app.pack and p.pack and p.char == 'Test pet' and len(app.pack[0]['idle'][0]) == 2
+        panel.set_count('', 2)  # two blobs join it
+        assert sorted(q.char for q in app.pets) == ['', '', 'Test pet'] and load_settings()['roster'] == {'Test pet': 1, '': 2}
+        assert clean_roster({'a': 20, 'b': 3, '': -1, '../x': 1}, '', 1) == {'a': 10} and clean_roster(None, 'Yellow', 2) == {'Yellow': 2}
+        panel.set_count('Test pet', 99)  # capped: ten pets at most
+        assert len(app.pets) == 10
+        panel.set_count('', 0)
+        panel.set_count('Test pet', 1)
+        assert [q.char for q in app.pets] == ['Test pet']
+        p = app.pets[0]
         for s in ('walk', 'climb', 'sit'):  # walk has its own image, climb/sit fall back to idle
             p.state = s
             p.draw()
