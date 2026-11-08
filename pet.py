@@ -394,8 +394,6 @@ class Pet:
         self.th = self.om = 0.0  # radians, radians/s: swing about the held hand or foot (0: hanging straight down)
         self.lean, self.pose = 0.0, None  # held by the hand: the shown picture's own body angle; (picture, when)
         self.sparks = []  # Yellow's staff fall: sparkles off the gem, [x, y, vx, vy, life]
-        self.rock = 0  # degrees: rocking on its back after landing upside down
-        self.dust = []  # TDL's landing: wind streaks along the floor, [side, height, reach, life, lifespan, curl]
         self.ledge = None  # the window this pet stands on, as (hwnd, left, top, right)
         self.dir = random.choice((-1, 1))
         self.frame = 0       # physics steps (30 a second): drives sprite animation and timers
@@ -471,7 +469,7 @@ class Pet:
         self.follow()
 
     def grip(self, img):
-        """Where a held picture's raised hand tip is on the px square, and its body's lean from straight down
+        """Where a held picture's raised hand tip is on the px square, and its arm's lean from straight down
         under that hand (radians, + = body to the right). Measured once per picture."""
         cache = self.app.__dict__.setdefault('grips', {})
         key = (id(img), self.px)
@@ -486,7 +484,13 @@ class Pet:
             tip = [p for p in upper if abs(p[0] - far[0]) <= 3 and abs(p[1] - far[1]) <= 3]
             hx, hy = sum(p[0] for p in tip) / len(tip), sum(p[1] for p in tip) / len(tip)
             dx, dy = (self.px - img.width) // 2, self.px - img.height
-            cache[key] = hx + dx, hy + dy, math.atan2(cx - hx, cy - hy)
+            # does the arm reach up to that hand? the solid pixels a short way from the tip, as a direction
+            k = img.width / 128
+            arm = [p for p in solid if 10 * k <= math.dist(p, (hx, hy)) <= 22 * k] or [(hx, hy + 1)]
+            ax, ay = sum(p[0] for p in arm) / len(arm) - hx, sum(p[1] for p in arm) / len(arm) - hy
+            lean = math.atan2(ax, ay)  # the arm is the rope: it is what lines up with the swing
+            up = abs(math.degrees(lean)) < 50  # the arm runs down from the hand, not sideways
+            cache[key] = hx + dx, hy + dy, lean, up
         return cache[key]
 
     def held_pose(self):
@@ -499,13 +503,15 @@ class Pet:
         side = 1 if self.dir < 0 else 0
         still = abs(self.om) < 0.4 and abs(self.th) < 0.15
         pics = frames['drag'][side] if still or 'ceiling' not in frames else frames['ceiling'][side]
-        pics = list({id(p): p for p in pics}.values())
+        uniq = lambda ps: [p for p in {id(p): p for p in ps}.values() if self.grip(p)[3]]  # hanging from a raised arm
+        # (a pack whose held picture has no raised arm, like TDL's, hangs still in its monkey-bar frames instead)
+        pics = uniq(pics) or uniq(frames.get('ceiling', ([], []))[side]) or list({id(p): p for p in pics}.values())
         want = self.th + 0.15 * self.om  # a touch ahead of the swing, like a body leading with its legs
         best = min(pics, key=lambda p: abs(self.grip(p)[2] - want))
         now = time.perf_counter()
         if self.pose is None or (best is not self.pose[0] and now - self.pose[1] > 0.1):  # no flicker
             self.pose = best, now
-        self.hx, self.hy, self.lean = self.grip(self.pose[0])
+        self.hx, self.hy, self.lean, _ = self.grip(self.pose[0])
         return self.pose[0]
 
     def follow(self, dt=0.0):
@@ -519,14 +525,14 @@ class Pet:
             vx = self.pv[0] + ((mx - self.pm[0]) / dt - self.pv[0]) * a
             vy = self.pv[1] + ((my - self.pm[1]) / dt - self.pv[1]) * a
             g, length = GRAVITY / STEP ** 2, self.px * 0.6  # px/s^2; pivot to the body's swing centre
-            # a flick still swings it hard, a jump of the pointer can't fling it round in circles
-            ax, ay = (max(-4 * g, min(4 * g, (v - p) / dt)) for v, p in zip((vx, vy), self.pv))
+            # a flick swings it hard (whirl the pointer to swing it right round); a jump of the pointer can't
+            ax, ay = (max(-6 * g, min(6 * g, (v - p) / dt)) for v, p in zip((vx, vy), self.pv))
             self.pv, self.pm = (vx, vy), (mx, my)
             n = max(1, int(dt / 0.004))  # small sub-steps keep the swing stable
             for _ in range(n):
                 al = (-(g - ay) * math.sin(self.th) - ax * math.cos(self.th)) / length - 2.5 * self.om
                 self.om += al * dt / n
-                self.th = max(-2.6, min(2.6, self.th + self.om * dt / n))
+                self.th = (self.th + self.om * dt / n + math.pi) % (2 * math.pi) - math.pi  # can go right round
             # held still a while: kicks to get free now and then (the swing then plays out on its own)
             self.calm = self.calm + dt if abs(self.om) < 0.3 and math.hypot(vx, vy) < 60 else 0.0
             if self.calm > 1.5 and random.random() < dt * 0.7:
@@ -551,7 +557,7 @@ class Pet:
         self.vy = max(-25, min(25, (y1 - y0) / dt * STEP))
         # let go: keeps its swing as spin, and a throw rolls it the way it was thrown (right: clockwise)
         self.spin = math.degrees(self.th) + (180 if self.state == 'hang' else 0)
-        self.spin_v = max(-15, min(15, math.degrees(self.om) * STEP - self.vx * (0.6 if self.state == 'hang' else 0.3)))
+        self.spin_v = max(-25, min(25, math.degrees(self.om) * STEP - self.vx * (0.6 if self.state == 'hang' else 0.3)))
         thrown = math.hypot(self.vx, self.vy) > 4
         if not thrown:  # let go without a throw: a plain, upright drop
             self.spin = self.spin_v = 0
@@ -579,8 +585,6 @@ class Pet:
 
     # --- behaviour ---
     def step(self):
-        if self.dust:  # TDL's landing wind: each gust runs its course
-            self.dust = [g[:3] + [g[3] - 1] + g[4:] for g in self.dust if g[3] > 1]
         L, T, R, B = self.area
         px, speed = self.px, self.app.settings['speed']
         floor, s = B - px, self.state
@@ -631,14 +635,6 @@ class Pet:
                 tdl = self.app.pack and not self.leap and self.app.settings['character'] == 'TDL'  # by name
                 hard = not (staff or tdl) and (self.vy > 30 or abs(self.spin) > 50)
                 self.sparks = []
-                if tdl:  # slams down: gusts of wind shoot out both ways along the floor (the taskbar's top edge)
-                    k = px / 128
-                    self.dust = []
-                    for side in (-1, 1):
-                        for j in range(4):
-                            life = random.randint(14, 20)
-                            self.dust.append([side, (j * 6 + random.uniform(0, 4)) * k, random.uniform(80, 150) * k,
-                                              life, life, random.uniform(6, 14) * k])
                 self.vx, self.vy, self.spin, self.spin_v = 0, 0, 0, 0
                 if back:
                     self.set('backland', 22)
@@ -760,12 +756,11 @@ class Pet:
                 s = 'ceiling'
             if s == 'crash' and 'land' in frames:  # crashed: face down, the landing animation's first picture
                 return frames['land'][1 if d < 0 else 0][0]
-            if s == 'backland':  # landed on its back: rocks a moment, then rolls over onto its front
+            if s == 'backland':  # landed on its back: lies a moment, then rolls over onto its front
                 k, side = f - self.since, 1 if d < 0 else 0
                 lay = frames['lie'][side][0]
                 front = frames['land'][side][0] if 'land' in frames else lay
-                self.rock = round(5 * math.sin(k * 0.9)) if k < 15 else 0
-                if k < 15:
+                if k < 15:  # lies still on its back a moment
                     return lay
                 # the roll: the back flattens away and the front grows back, like a card turned over
                 roll = ((lay, 0.6), (lay, 0.3), (front, 0.3), (front, 0.6), (front, 0.85))
@@ -796,8 +791,6 @@ class Pet:
         if not self.win.isVisible():
             return
         img = self.picture()
-        if self.dust:
-            return self.draw_dust(img, x, y)
         if self.state == 'fall' and self.app.pack and not self.leap and self.app.settings['character'] == 'Yellow':
             return self.draw_staff(img, x, y)
         top = self.state == 'ceiling'  # hanging: picture hugs the top edge, not the floor
@@ -805,11 +798,8 @@ class Pet:
         held = self.state in ('drag', 'hang')
         # turn: swing about the held hand or foot, or tumble in the air about the middle
         turn = (round(math.degrees(self.th - self.lean) / 2) * 2 if held else
-                round(self.spin / 4) * 4 % 360 if self.state == 'fall' else
-                self.rock if self.state == 'backland' else 0)  # rocking on its back, about its bottom middle
-        # held by the foot: arms and head trail behind the swing, bending the picture (px, in 2 px steps)
-        bend = round(max(-0.2, min(0.2, -self.om * 0.06)) * self.px / 2) * 2 if hang else 0
-        key = (id(img), top, hang, turn, bend, (round(self.hx), round(self.hy)) if held else None)
+                round(self.spin / 4) * 4 % 360 if self.state == 'fall' else 0)
+        key = (id(img), top, hang, turn, (round(self.hx), round(self.hy)) if held else None)
         shown = self.shown.get(key)
         if shown is None:
             from PIL import Image
@@ -819,19 +809,10 @@ class Pet:
             if hang:
                 canvas = canvas.transpose(Image.Transpose.ROTATE_180)
             dx = dy = 0  # where the picture's corner sits, from the pet's position
-            if turn or bend:  # room to turn all the way round the pivot, then trimmed to what's drawn
+            if turn:  # room to turn all the way round the pivot, then trimmed to what's drawn
                 big = Image.new('RGBA', (3 * px, 3 * px), (0, 0, 0, 0))
                 big.paste(canvas, (px, px))
-                if bend:  # shift each band sideways, more the further below the held foot: a smooth curve
-                    W, top_y, n = 3 * px, self.hy + px, 12
-                    ys = [top_y + (3 * px - top_y) * k / n for k in range(n + 1)]
-                    sh = [bend * min(1.0, (y - top_y) / px) ** 2 for y in ys]
-                    big = big.transform(big.size, Image.MESH, [((0, 0, W, int(top_y)), (0, 0, 0, top_y, W, top_y, W, 0))] + [
-                        ((0, int(ys[k]), W, int(ys[k + 1])),
-                         (-sh[k], ys[k], -sh[k + 1], ys[k + 1], W - sh[k + 1], ys[k + 1], W - sh[k], ys[k]))
-                        for k in range(n)], Image.BICUBIC)
-                big = big.rotate(turn, Image.BICUBIC, center=(self.hx + px, self.hy + px) if held else
-                                 (px * 1.5, px * 2 - 2) if self.state == 'backland' else None)
+                big = big.rotate(turn, Image.BICUBIC, center=(self.hx + px, self.hy + px) if held else None)
                 l, t, r, b = big.getbbox() or (px, px, px + 1, px + 1)
                 canvas, dx, dy = big.crop((l, t, r, b)), l - px, t - px
             # premultiplied, as Windows wants
@@ -842,33 +823,6 @@ class Pet:
         data, w, h, dx, dy = shown
         show_layered(self.win.hwnd, data, w, h, round(self.x if x is None else x) + dx,
                      round(self.y if y is None else y) + dy)
-
-    def draw_dust(self, img, x, y):
-        """The picture with TDL's landing wind: curved streaks shooting out both ways from his feet, low along
-        the floor, curling up at their tips, thickest in the middle, thinning and fading as they run out."""
-        from PIL import Image, ImageDraw
-        px, S = self.px, 2  # drawn 2x, then shrunk for smooth edges
-        pad = px * 2  # room for the wind to run sideways
-        layer = Image.new('RGBA', ((px + 2 * pad) * S, px * S), (0, 0, 0, 0))
-        d = ImageDraw.Draw(layer)
-        fx, fy = pad + px / 2, px - 2 * px / 128  # his feet
-        for side, h, reach, life, span, curl in self.dust:
-            p = 1 - life / span  # 0 -> 1 over its life
-            tip = reach * (1 - (1 - p) ** 2)  # shoots out fast, eases off
-            tail = tip * 0.45 * (0.5 + p)  # the back end catches up as it dies
-            a = int(210 * (1 - p) ** 0.7)
-            pts = []
-            for i in range(13):
-                t = i / 12  # tail -> tip
-                pts.append(((fx + side * (tail + (tip - tail) * t)) * S, (fy - h - curl * t ** 3 * (0.4 + p)) * S))
-            for i in range(12):  # tapered: thick in the middle, a point at each end
-                wdt = max(1, round(3.2 * S * px / 128 * math.sin(math.pi * (i + 0.5) / 12)))
-                d.line((pts[i], pts[i + 1]), fill=(225, 220, 210, a), width=wdt)
-        im = Image.new('RGBA', (px + 2 * pad, px), (0, 0, 0, 0))
-        im.alpha_composite(img, (pad + (px - img.width) // 2, px - img.height))
-        im.alpha_composite(layer.resize(im.size, Image.LANCZOS))
-        show_layered(self.win.hwnd, im.convert('RGBa').tobytes('raw', 'BGRa'), im.width, im.height,
-                     round(self.x if x is None else x) - pad, round(self.y if y is None else y))
 
     def draw_staff(self, img, x, y):
         """Yellow riding his staff down: his fall picture as drawn, with sparkles streaming off the gem."""
