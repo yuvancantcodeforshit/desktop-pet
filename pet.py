@@ -1883,6 +1883,7 @@ def selftest():
         app.set_visible(False)
         assert not any(q.win.isVisible() for q in app.pets)
         app.set_visible(True)
+        assert panel.grab().toImage().pixelColor(panel.width() // 2, panel.height() - 3).alpha() > 0  # no click-through gaps
         panel.close()
         app.quit()
     print('selftest ok')
