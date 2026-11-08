@@ -860,7 +860,7 @@ class Pet:
                 if back:
                     self.set('backland', 15)
                 elif tdl:  # TDL's landing: the whole thing, slow, so it lands with weight
-                    self.land(full=True, slow=1.5)
+                    self.land(full=True, slow=1.2)
                 else:
                     self.land(hard)
         elif s == 'land':
