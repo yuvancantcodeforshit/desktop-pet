@@ -7,7 +7,7 @@ import colorsys, ctypes, os, sys, threading, webbrowser
 from PySide6.QtCore import QEasingCurve, QPropertyAnimation, QRectF, QSize, Qt, QTimer, QVariantAnimation
 from PySide6.QtGui import QColor, QCursor, QFont, QFontDatabase, QGuiApplication, QIcon, QPainter, QPixmap
 from PySide6.QtWidgets import (QAbstractButton, QCheckBox, QColorDialog, QComboBox, QFileDialog, QFrame, QGridLayout,
-                               QGraphicsDropShadowEffect, QGraphicsOpacityEffect, QHBoxLayout, QLabel, QMenu, QMessageBox, QPushButton, QScrollArea, QSlider,
+                               QGraphicsDropShadowEffect, QGraphicsOpacityEffect, QHBoxLayout, QLabel, QMenu, QMessageBox, QPlainTextEdit, QPushButton, QScrollArea, QSlider,
                                QStackedWidget, QVBoxLayout, QWidget, QWidgetAction)
 
 import packs
@@ -183,6 +183,7 @@ class SettingsWindow(QWidget):
         super().__init__(None, Qt.FramelessWindowHint | Qt.Window)  # our own title bar, still on the taskbar
         self.app, self.core, self.tab = app, core, tab
         self.subtab = {}        # page -> chosen sub-tab
+        self.edit_char = ''     # character shown on Characters > Tweaks
         self.open_sections = {'General'}
         self.status = ''        # message on the Characters tab (import result)
         self.thumbs = {}        # (pack name, px) -> loaded frames, kept for the window's life
@@ -411,6 +412,8 @@ class SettingsWindow(QWidget):
             QSlider::sub-page:horizontal {{ background: {c['acc']}; border-radius: 2px; }}
             QSlider::handle:horizontal {{ background: {c['acc']}; width: 18px; height: 18px; margin: -7px 0;
                                           border-radius: 9px; border: 2px solid {c['bg']}; }}
+            QPlainTextEdit {{ background: {c['hover']}; border: none; border-radius: 8px; padding: 6px;
+                              font-family: "Cascadia Mono", Consolas; font-size: 12px; }}
             QComboBox {{ background: {c['hover']}; border: none; border-radius: 8px; padding: 6px 10px; min-width: 140px; }}
             QComboBox QAbstractItemView {{ background: {c['card']}; selection-background-color: {c['acc']};
                                            selection-color: {c['on_acc']}; border: 1px solid {c['border']}; }}
@@ -814,7 +817,8 @@ class SettingsWindow(QWidget):
     # --- Characters ---
     def page_characters(self):
         self.header('', 'Characters', 'Pick who lives on your desk')
-        self.subtabs('characters', (('Characters', '', self.sub_packs), ('Blob look', '', self.sub_blob)))
+        self.subtabs('characters', (('Characters', '', self.sub_packs), ('Tweaks', '', self.sub_tweaks),
+                                       ('Blob look', '', self.sub_blob)))
 
     def sub_packs(self, lay):
         row = QHBoxLayout()
@@ -848,8 +852,105 @@ class SettingsWindow(QWidget):
             if name:
                 path = os.path.join(self.core.PACKS_DIR, name)
                 h.addWidget(self.glyph('', lambda p=path: os.startfile(p), tip='Open its folder'))
+                h.addWidget(self.glyph('\ue713', lambda n=name: self.tweak(n), tip='Tweaks'))
                 h.addWidget(self.glyph('', lambda n=name: self.delete(n), DANGER, 'Delete'))
             lay.addWidget(r)
+
+    def tweak(self, name):
+        """Gear on a character row: open its Tweaks."""
+        self.edit_char = name
+        self.pick_subtab('characters', 'Tweaks')
+
+    def set_opt(self, name, key, value):
+        """Save one option of one character (None = back to its default) and push it to the pets."""
+        st = self.app.settings
+        mine = dict(st['chars'].get(name, {}))
+        if value is None:
+            mine.pop(key, None)
+        else:
+            mine[key] = value
+        st['chars'] = self.core.clean_chars({**st['chars'], name: mine})
+        self.app.apply()
+
+    def sub_tweaks(self, lay):
+        """Options of one character; the ones only some characters have show only for them."""
+        st = self.app.settings
+        names = [n for n, _ in packs.list_packs(self.core.PACKS_DIR)]
+        name = self.edit_char if self.edit_char in names else (st['character'] if st['character'] in names
+                                                              else (names[0] if names else ''))
+        if not name:
+            lay.addWidget(QLabel('Add a character first. The default blob has no tweaks.', objectName='muted'))
+            return
+        self.edit_char = name
+        opt = lambda k: self.core.char_opt(st, name, k)
+        row = QHBoxLayout()
+        row.addWidget(QLabel('Tweaks for', objectName='bold'))
+        pick = QComboBox()
+        pick.addItems(names)
+        pick.setCurrentText(name)
+        pick.currentTextChanged.connect(lambda v: self.tweak(v))
+        row.addWidget(pick)
+        row.addStretch(1)
+        lay.addLayout(row)
+        lay.addWidget(QLabel('Only this character. Pets pick changes up right away.', objectName='muted'))
+        lay.addWidget(QLabel('Falling', objectName='section'))
+        row = QHBoxLayout()
+        row.addWidget(QLabel('Fall style'))
+        fall = QComboBox()
+        fall.addItems(['Steady (capped speed)', 'Free fall (full gravity)'])
+        fall.setCurrentIndex(0 if opt('fall') == 'steady' else 1)
+        fall.currentIndexChanged.connect(lambda i: self.set_opt(name, 'fall', 'steady' if i == 0 else 'free'))
+        row.addWidget(fall)
+        row.addStretch(1)
+        lay.addLayout(row)
+        row = QHBoxLayout()
+        row.addWidget(QLabel('Crash height'))
+        val = QLabel(f"{opt('crash')} px")
+        val.setFixedWidth(60)
+        sl = QSlider(Qt.Horizontal)
+        sl.setRange(4, 30)  # steps of 50 px: 200..1500
+        sl.setValue(max(4, min(30, round(opt('crash') / 50))))
+        sl.setCursor(Qt.PointingHandCursor)
+
+        def moved(v):
+            val.setText(f'{v * 50} px')
+            self.set_opt(name, 'crash', v * 50)
+        sl.valueChanged.connect(moved)
+        row.addWidget(sl, 1)
+        row.addWidget(val)
+        lay.addLayout(row)
+        lay.addWidget(QLabel('Drops from higher than this end in a crash landing.', objectName='muted'))
+        extras = self.core.CHAR_EXTRAS.get(name, ())
+        if extras:
+            lay.addWidget(QLabel('Only for ' + name, objectName='section'))
+        if 'laptop' in extras:
+            self.switch_row(lay, 'Laptop', 'Sits down and codes on his laptop. Off: he just sits.',
+                            opt('laptop'), lambda on: self.set_opt(name, 'laptop', on))
+        if 'sparkles' in extras:
+            self.switch_row(lay, 'Staff sparkles', 'Sparkles fly off his staff when he falls.',
+                            opt('sparkles'), lambda on: self.set_opt(name, 'sparkles', on))
+        if 'code' in extras:
+            lay.addWidget(QLabel('Lines he types', objectName='bold'))
+            lay.addWidget(QLabel('One per line, 40 characters at most. Add " => text" to show what it prints.',
+                                 objectName='muted'))
+            default = [c + (f' => {o}' if o else '') for c, o in self.core.Pet.CODE]
+            box = QPlainTextEdit('\n'.join(opt('code') or default))
+            box.setFixedHeight(130)
+            lay.addWidget(box)
+
+            def save():
+                lines = [''.join(ch for ch in l if ch.isprintable())[:40].rstrip() for l in box.toPlainText().splitlines()]
+                lines = [l for l in lines if l.strip()][:20]
+                self.set_opt(name, 'code', None if not lines or lines == default else lines)
+                self.build_pages()
+            row = QHBoxLayout()
+            row.addWidget(self.button('Save lines', save, 'primary'))
+            row.addWidget(self.button('Reset lines', lambda: (self.set_opt(name, 'code', None), self.build_pages())))
+            row.addStretch(1)
+            lay.addLayout(row)
+        lay.addWidget(self.button('Reset all tweaks for ' + name,
+                                  lambda: (self.app.settings['chars'].pop(name, None), self.app.apply(), self.build_pages())),
+                      0, Qt.AlignLeft)
 
     def sub_blob(self, lay):
         st = self.app.settings
