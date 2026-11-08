@@ -943,7 +943,8 @@ class Pet:
             hunch.alpha_composite(part['head'], (round(4 * k), round(1.5 * k)))
             # his head as a clean round circle, the same size and place (the enlarged picture's edge is rough
             # and flat where it was cut from the neck)
-            hb_ = hunch.getbbox() or (0, 0, 2, 2)
+            solid_ = hunch.getchannel('A').point(lambda v: 255 if v > 128 else 0)  # the head itself, not its soft edge
+            hb_ = solid_.getbbox() or (0, 0, 2, 2)
             r_, hcx = (hb_[2] - hb_[0]) / 2, (hb_[0] + hb_[2]) / 2
             yel = next((c for c in hunch.getdata() if c[3] == 255), (255, 197, 0, 255))
             part['head'] = Image.new('RGBA', img.size, (0, 0, 0, 0))
