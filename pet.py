@@ -608,6 +608,7 @@ class Pet:
 
     def menu(self):
         m = QMenu()
+        m.setStyleSheet(self.app.menu_qss())
         m.addAction('Settings...', self.app.open_settings)
         m.addAction('Add pet', self.app.add)
         m.addAction('Remove this pet', lambda: self.app.remove(self))
@@ -1416,6 +1417,10 @@ class App:
             if self.pack and 'idle' not in self.pack[0]:
                 self.pack = None
 
+    def menu_qss(self):
+        from panel import menu_qss  # the menus follow the Settings theme
+        return menu_qss(sys.modules[__name__], self.settings)
+
     def apply(self):
         """Save settings and push them to every pet. The Settings window calls this on each change."""
         save_settings(self.settings)
@@ -1430,6 +1435,7 @@ class App:
             self.remove(self.pets[-1])
         if self.tray:
             self.tray.setIcon(QIcon(to_pixmap(logo_image(64, self.settings['color']))))
+            self.tray_menu.setStyleSheet(self.menu_qss())
 
     def blob_frame(self, s, d, step, blink, style, color, px):
         """Smooth picture of the default pet for one pose, drawn once and reused."""
@@ -1462,6 +1468,7 @@ class App:
         tray = QSystemTrayIcon(QIcon(to_pixmap(logo_image(64, self.settings['color']))))
         tray.setToolTip('Desktop Pet')
         menu = self.tray_menu = QMenu()
+        menu.setStyleSheet(self.menu_qss())
         menu.addAction('Settings', self.open_settings)
         self.show_action = QAction('Show pets', menu, checkable=True, checked=True)
         self.show_action.toggled.connect(lambda on: on != self.visible and self.set_visible(on))
