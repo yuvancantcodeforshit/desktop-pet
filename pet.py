@@ -915,7 +915,7 @@ def pet_px(settings):
 
 def with_laptop(img, lying=False, glow=False):
     """Yellow's laptop on the floor beside the picture, lid open towards his face: a flat silver lid with a grey
-    edge and a white logo dot, seen from behind, the screen's light on his side (brighter when glow).
+    edge and a scribbled white apple logo, seen from behind, the screen's light on his side (brighter when glow).
     Sitting: just in front of his knees, under his hands. Lying back (the lie picture, knees up): past his knees.
     The picture comes back wider, the figure still in the middle, so the laptop is never cut off."""
     from PIL import Image, ImageDraw
@@ -957,7 +957,13 @@ def with_laptop(img, lying=False, glow=False):
     lid = [(bx(3 * u), b - 3 * u), (bx(w - 4 * u), b - 3 * u), (bx(w - 4 * u) + f * lean, top), (bx(3 * u) + f * lean, top)]
     poly(lid, (200, 203, 208, 255), (128, 131, 138, 255), 1.6)
     sx, sy = sum(p[0] for p in lid) / 4, sum(p[1] for p in lid) / 4
-    d.ellipse((*at(sx - 2.6 * u, sy - 2.6 * u), *at(sx + 2.6 * u, sy + 2.6 * u)), fill=(255, 255, 255, 255))
+    # the logo, scribbled like in the video: a white apple blob with a bite out of one side and a tilted leaf
+    lidc, white = (200, 203, 208, 255), (255, 255, 255, 255)
+    d.ellipse((*at(sx - 3 * u, sy - 2.6 * u), *at(sx + 3 * u, sy + 3.2 * u)), fill=white)
+    bite = sx + face * 3.1 * u  # the bite faces him
+    d.ellipse((*at(bite - 1.6 * u, sy - 1.2 * u), *at(bite + 1.6 * u, sy + 1.6 * u)), fill=lidc)
+    d.polygon([at(sx + 0.2 * u, sy - 2.8 * u), at(sx + 1.6 * u, sy - 5.2 * u), at(sx + 2.4 * u, sy - 4.4 * u),
+               at(sx + 0.8 * u, sy - 2.6 * u)], fill=white)  # the leaf
     light = (215, 240, 255, 255) if glow else (160, 200, 240, 255)  # the screen's light, on his side
     d.line([at(*lid[1]), at(*lid[2])], fill=light, width=max(1, int(u * k * 1.3)))
     out = big.resize((W, img.height), Image.LANCZOS)
