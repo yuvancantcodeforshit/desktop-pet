@@ -838,7 +838,7 @@ class Pet:
             if turn:  # room to turn all the way round the pivot, then trimmed to what's drawn
                 big = Image.new('RGBA', (3 * px, 3 * px), (0, 0, 0, 0))
                 big.paste(canvas, (px, px))
-                big = big.rotate(turn, Image.BICUBIC, center=(self.hx + px, self.hy + px) if held else None)
+                big = turned(big, turn, center=(self.hx + px, self.hy + px) if held else None)
                 l, t, r, b = big.getbbox() or (px, px, px + 1, px + 1)
                 canvas, dx, dy = big.crop((l, t, r, b)), l - px, t - px
             # premultiplied, as Windows wants
@@ -865,6 +865,7 @@ class Pet:
                                                'idle': 0})
         t['tap'] = max(0, t['tap'] - 1)
         t['idle'] += 1
+        t['look'] = max(0, min(3, t.get('look', 0) + (1 if t['glance'] else -1)))  # head eases up / back down
         if t['glance']:
             t['glance'] -= 1
             return
@@ -903,108 +904,166 @@ class Pet:
     def desk_parts(self):
         """His standing picture (facing you) cut into head, body and arms, sat down on crossed legs (drawn in his
         own yellow and line width), turned to the laptop at his right-front (towards the code), hands on its keys.
-        Returns (base, head, arms, lid, arm shoulder points, head centre, scale), cached per size."""
+        Built at 4x the pet's size so the cuts and turns stay clean, with round joints over the neck and shoulders.
+        Returns (base, head, arms, lid, shoulder points, head pivot, head centre, scale k, R), all at 4x."""
         from PIL import Image, ImageDraw
         cache = self.app.__dict__.setdefault('desks', {})
-        img = self.app.pack[0]['idle'][0][0]
-        key = (id(img), self.px)
-        if cache.get(key, (None,))[0] is not img:  # keyed by the picture itself (ids get reused)
-            k, W, H = img.width / 128, img.width, img.height
+        src_img = self.app.pack[0]['idle'][0][0]
+        key = (id(src_img), self.px)
+        if cache.get(key, (None,))[0] is not src_img:  # keyed by the picture itself (ids get reused)
+            R = 4
+            img = src_img.resize((src_img.width * R, src_img.height * R), Image.BICUBIC)
+            k, W, H = img.width / 128, img.width, img.height  # k: 1/128 of the (4x) picture
             l, t, r, b = img.getbbox() or (0, 0, W, H)
             h, cx = b - t, (l + r) / 2
             neck, hip = t + 0.21 * h, t + 0.53 * h
             seat = b - 9 * k
             dy = round(seat - hip)  # sat down: everything above the hips drops by this
-            src = img.load()
-            head, body = Image.new('RGBA', img.size), Image.new('RGBA', img.size)
-            arms = [Image.new('RGBA', img.size), Image.new('RGBA', img.size)]
+            al = img.getchannel('A')
+            masks = {n: Image.new('L', img.size, 0) for n in ('head', 'body', 'arm0', 'arm1')}
+            mp = {n: m.load() for n, m in masks.items()}
+            ap = al.load()
             for yy in range(int(t), int(hip) + 1):
                 for xx in range(W):
-                    c = src[xx, yy]
-                    if not c[3] or yy + dy >= H:
+                    if not ap[xx, yy]:
                         continue
-                    if yy < neck:
-                        head.putpixel((xx, yy + dy), c)
-                    elif abs(xx - cx) <= 3.5 * k:
-                        body.putpixel((xx, yy + dy), c)
-                    else:
-                        arms[0 if xx < cx else 1].putpixel((xx, yy + dy), c)
+                    n = 'head' if yy < neck else 'body' if abs(xx - cx) <= 3.5 * k else 'arm0' if xx < cx else 'arm1'
+                    mp[n][xx, yy] = 255
+            part = {}
+            for n, m in masks.items():
+                pic = Image.new('RGBA', img.size, (0, 0, 0, 0))
+                pic.paste(img, (0, 0), m)
+                out = Image.new('RGBA', img.size, (0, 0, 0, 0))
+                out.alpha_composite(pic.crop((0, 0, W, H - dy)), (0, dy))
+                part[n] = out
+            hb0 = part['head'].getbbox() or (0, 0, W, H)
+            cx = (hb0[0] + hb0[2]) / 2  # from here on, his middle is under his head (the arms widen the picture)
+            # hunched over the laptop: head a little forward and down, back curving out behind him
+            hunch = Image.new('RGBA', img.size, (0, 0, 0, 0))
+            hunch.alpha_composite(part['head'], (round(4 * k), round(1.5 * k)))
+            # his head as a clean round circle, the same size and place (the enlarged picture's edge is rough
+            # and flat where it was cut from the neck)
+            hb_ = hunch.getbbox() or (0, 0, 2, 2)
+            r_, hcx = (hb_[2] - hb_[0]) / 2, (hb_[0] + hb_[2]) / 2
+            yel = next((c for c in hunch.getdata() if c[3] == 255), (255, 197, 0, 255))
+            part['head'] = Image.new('RGBA', img.size, (0, 0, 0, 0))
+            ImageDraw.Draw(part['head']).ellipse((hcx - r_, hb_[1], hcx + r_, hb_[1] + 2 * r_), fill=yel)
             col = (255, 197, 0, 255)
             for yy in range(int(neck), int(hip)):  # his own yellow, from the middle of his body
-                c = src[round(cx), yy]
+                c = img.getpixel((round(cx), yy))
                 if c[3] == 255:
                     col = c
                     break
-            S = 4  # legs and laptop drawn 4x, shrunk for smooth edges
-            big = Image.new('RGBA', (W * S, H * S), (0, 0, 0, 0))
+            lw = 6 * k  # his line width
+            big = Image.new('RGBA', img.size, (0, 0, 0, 0))
             d = ImageDraw.Draw(big)
 
-            def stroke(p, q, w=6 * k):
-                d.line([(p[0] * S, p[1] * S), (q[0] * S, q[1] * S)], fill=col, width=round(w * S))
-                for x0, y0 in (p, q):
-                    d.ellipse(((x0 - w / 2) * S, (y0 - w / 2) * S, (x0 + w / 2) * S, (y0 + w / 2) * S), fill=col)
-            hp = (cx, seat)
-            k1, k2 = (cx - 23 * k, b - 5 * k), (cx + 23 * k, b - 5 * k)  # knees out to the sides
-            stroke(hp, k1)
-            stroke(hp, k2)
-            stroke(k1, (cx + 9 * k, b - 3 * k))  # shins crossing in front
-            stroke(k2, (cx - 9 * k, b - 3 * k))
-            legs = big.resize(img.size, Image.LANCZOS)
-            lid = Image.new('RGBA', (W * S, H * S), (0, 0, 0, 0))
-            d = ImageDraw.Draw(lid)
-            P = lambda pts: [(x0 * S, y0 * S) for x0, y0 in pts]
-            silver, edge = (200, 203, 208, 255), (128, 131, 138, 255)
-            # the laptop on his lap, turned to his right-front (towards the code): the keyboard deck in front of him,
-            # the lid rising from its far edge and leaning back, its silver back and scribbled apple towards you
-            deck = [(cx - 4 * k, b - 7 * k), (cx + 18 * k, b - 7 * k), (cx + 26 * k, b - 12 * k), (cx + 4 * k, b - 12 * k)]
-            d.polygon(P(deck), fill=(150, 153, 160, 255), outline=(110, 113, 120, 255), width=round(1.2 * k * S))
-            lidq = [(cx + 4 * k, b - 12 * k), (cx + 26 * k, b - 12 * k), (cx + 32 * k, b - 36 * k), (cx + 10 * k, b - 36 * k)]
-            d.polygon(P(lidq), fill=silver, outline=edge, width=round(1.6 * k * S))
-            d.line(P([lidq[0], lidq[3]]), fill=(160, 200, 240, 255), width=round(1.3 * k * S))  # screen light, his side
-            ax, ay, white = sum(q[0] for q in lidq) / 4, sum(q[1] for q in lidq) / 4, (255, 255, 255, 255)
-            d.ellipse(P([(ax - 3.2 * k, ay - 2.8 * k), (ax + 3.2 * k, ay + 3.4 * k)]), fill=white)  # the apple
-            d.ellipse(P([(ax - 5 * k, ay - 1.4 * k), (ax - 1.8 * k, ay + 1.8 * k)]), fill=silver)  # its bite, facing him
-            d.polygon(P([(ax + .2 * k, ay - 3 * k), (ax + 1.8 * k, ay - 5.8 * k), (ax + 2.6 * k, ay - 5 * k),
-                         (ax + .8 * k, ay - 2.8 * k)]), fill=white)  # its leaf
-            lid = lid.resize(img.size, Image.LANCZOS)
-            base = Image.new('RGBA', img.size)
-            base.alpha_composite(legs)
-            base.alpha_composite(body)
+            def stroke(p_, q, w=lw):
+                d.line([p_, q], fill=col, width=round(w))
+                for x0, y0 in (p_, q):
+                    d.ellipse((x0 - w / 2, y0 - w / 2, x0 + w / 2, y0 + w / 2), fill=col)
+            k1, k2 = (cx - 21 * k, b - 8 * k), (cx + 21 * k, b - 8 * k)  # knees out to the sides, a little up
+            stroke((cx - 2 * k, seat), k1)
+            stroke((cx + 2 * k, seat), k2)
+            stroke(k2, (cx - 7 * k, b - 3 * k))  # shins crossing in front, feet tucked under the other knee
+            stroke(k1, (cx + 7 * k, b - 3 * k))
+            hb = part['head'].getbbox() or (0, 0, 1, 1)
+            pivot = ((hb[0] + hb[2]) / 2, hb[3])  # where the head sits on the neck
+            top_ = (pivot[0], pivot[1] - 4 * k)  # neck and body: one smooth curve, arched back, down to his seat
+            spine = [((1 - u) ** 2 * cx + 2 * u * (1 - u) * (cx - 5 * k) + u ** 2 * top_[0],
+                      (1 - u) ** 2 * seat + 2 * u * (1 - u) * ((seat + top_[1]) / 2) + u ** 2 * top_[1])
+                     for u in (i / 16 for i in range(17))]
+            for p0, p1 in zip(spine, spine[1:]):
+                stroke(p0, p1, lw)
             shoulders = []
-            for n, a in enumerate(arms):  # each arm swung from its shoulder so the hand lands on the keys
-                bb = a.getbbox() or (0, 0, 1, 1)
-                sh = ((bb[0] + bb[2]) / 2, bb[1])
-                al = a.getchannel('A').tobytes()
-                pts = [(q % W, q // W) for q in range(len(al)) if al[q] > 128] or [sh]
-                hand = max(pts, key=lambda q: math.dist(q, sh))
-                key_ = (cx + (3 if n == 0 else 13) * k, b - 10 * k)
-                turn = math.degrees(math.atan2(key_[1] - sh[1], key_[0] - sh[0]) - math.atan2(hand[1] - sh[1], hand[0] - sh[0]))
-                arms[n] = a.rotate(-turn, Image.BICUBIC, center=sh)
+            for n in ('arm0', 'arm1'):  # the shoulder: where the arm meets the top of his body
+                alp = part[n].getchannel('A').tobytes()
+                pts = [(q % W, q // W) for q in range(0, len(alp), 2) if alp[q] > 128] or [(cx, neck + dy)]
+                sh = min(pts, key=lambda q: math.dist(q, (cx, neck + dy + lw)))
+                sh = (sh[0] + (lw / 3 if sh[0] < cx else -lw / 3), sh[1] + lw / 3)  # a little inside the arm's end
                 shoulders.append(sh)
-            hb = head.getbbox() or (0, 0, 1, 1)
-            cache[key] = img, base, head, arms, lid, shoulders, ((hb[0] + hb[2]) / 2, (hb[1] + hb[3]) / 2), k
+            caps = Image.new('RGBA', img.size, (0, 0, 0, 0))  # drawn over the arms: rounds off their cut tops
+            dc = ImageDraw.Draw(caps)
+            for sh in shoulders:
+                r_ = lw * 0.62
+                dc.ellipse((sh[0] - r_, sh[1] - r_, sh[0] + r_, sh[1] + r_), fill=col)
+            base = Image.new('RGBA', img.size)
+            base.alpha_composite(big)
+            lid = Image.new('RGBA', img.size, (0, 0, 0, 0))
+            d = ImageDraw.Draw(lid)
+            silver, edge = (200, 203, 208, 255), (128, 131, 138, 255)
+            # the laptop up on his lap, turned to his right-front (towards the code): the keyboard deck in front of him,
+            # the lid rising from its far edge and leaning back, its silver back and scribbled apple towards you
+            dx_ = 10 * k  # out towards his knee, almost hanging off it, so his typing hands show
+            deck = [(cx - 2 * k + dx_, b - 8 * k), (cx + 18 * k + dx_, b - 8 * k), (cx + 24 * k + dx_, b - 13 * k),
+                    (cx + 4 * k + dx_, b - 13 * k)]
+            d.polygon(deck, fill=(150, 153, 160, 255), outline=(110, 113, 120, 255), width=round(1.2 * k))
+            lidq = [(cx + 4 * k + dx_, b - 13 * k), (cx + 24 * k + dx_, b - 13 * k), (cx + 30 * k + dx_, b - 36 * k),
+                    (cx + 10 * k + dx_, b - 36 * k)]
+            d.polygon(lidq, fill=silver, outline=edge, width=round(1.6 * k))
+            d.line([lidq[0], lidq[3]], fill=(160, 200, 240, 255), width=round(1.3 * k))  # screen light, his side
+            ax, ay, white = sum(q[0] for q in lidq) / 4, sum(q[1] for q in lidq) / 4, (255, 255, 255, 255)
+            d.ellipse((ax - 3.2 * k, ay - 2.8 * k, ax + 3.2 * k, ay + 3.4 * k), fill=white)  # the apple
+            d.ellipse((ax - 5 * k, ay - 1.4 * k, ax - 1.8 * k, ay + 1.8 * k), fill=silver)  # its bite, facing him
+            d.polygon([(ax + .2 * k, ay - 3 * k), (ax + 1.8 * k, ay - 5.8 * k), (ax + 2.6 * k, ay - 5 * k),
+                       (ax + .8 * k, ay - 2.8 * k)], fill=white)  # its leaf
+            arms = []
+            for n, sh in zip(('arm0', 'arm1'), shoulders):  # each arm swung from its shoulder so the hand lands on the keys
+                a_ = part[n]
+                alp = a_.getchannel('A').tobytes()
+                pts = [(q % W, q // W) for q in range(0, len(alp), 3) if alp[q] > 128] or [sh]
+                hand = max(pts, key=lambda q: math.dist(q, sh))
+                key_ = (cx + (5 if n == 'arm0' else 13) * k, b - 10 * k)  # on the keyboard, behind the lid
+                turn = math.degrees(math.atan2(key_[1] - sh[1], key_[0] - sh[0]) - math.atan2(hand[1] - sh[1], hand[0] - sh[0]))
+                arms.append(turned(a_, -turn, sh))
+            hc = ((hb[0] + hb[2]) / 2, (hb[1] + hb[3]) / 2)
+            # his arms as clean lines in his own yellow and width: from his body line
+            # down to the keys (hidden behind the lid), so nothing sticks out where an arm turns
+            sh_ = spine[13]  # shoulders: high on his curved back
+            # far arm, then near arm: shoulder -> elbow (by his side, a little forward) -> hand on the keys
+            reach = [(sh_, (sh_[0] + 1 * k, sh_[1] + 17 * k), (cx + 15 * k, b - 12 * k)),
+                     (sh_, (sh_[0] + 4 * k, sh_[1] + 16 * k), (cx + 22 * k, b - 12 * k))]
+            cache[key] = src_img, base, part['head'], reach, lid, (col, lw), pivot, hc, k, R, caps
         return cache[key][1:]
 
+    def desk_frame(self, dips, look):
+        """One picture of him at the laptop (pet size): arms dipped by dips (degrees) as he taps, head tipped up
+        by look (0-3) towards the code. Built at 4x and shrunk, cached per pose."""
+        from PIL import Image, ImageDraw
+        cache = self.app.__dict__.setdefault('desk_frames', {})
+        parts = self.desk_parts()
+        key = (id(parts[0]), dips, look)
+        if key not in cache:
+            base, head, reach, lid, (col, lw), pivot, hc, k, R, caps = parts
+            im = base.copy()
+            d = ImageDraw.Draw(im)
+            for (sh, el, key_), dip in zip(reach, dips):  # a keypress: that hand dips a touch, the elbow stays
+                end = (key_[0], key_[1] + dip * k)
+                d.line([sh, el, end], fill=col, width=round(lw), joint='curve')
+                for x0, y0 in (sh, el, end):
+                    d.ellipse((x0 - lw / 2, y0 - lw / 2, x0 + lw / 2, y0 + lw / 2), fill=col)
+            im.alpha_composite(lid)  # the laptop in front of his arms: his hands are on its keys, behind the lid
+            im.alpha_composite(turned(head, -5 + 7 * look / 3, pivot))  # tipped down at the screen; looks up a little
+            if len(cache) > 200:
+                cache.clear()
+            cache[key] = im.resize((im.width // R, im.height // R), Image.LANCZOS)
+        return cache[key]
+
     def draw_desk(self, x, y):
-        """Yellow at his laptop: arms bob as he types, head down at the laptop or glancing up at his code,
-        which appears in a little terminal by his head (a blinking underscore when he stops)."""
+        """Yellow at his laptop: hands tap as he types, head eases up to glance at his code, which appears in a
+        little terminal by his head (a blinking underscore when he stops)."""
         from PIL import Image, ImageDraw, ImageFont
-        base, head, arms, lid, shoulders, (hx, hy), k = self.desk_parts()
-        t = self.__dict__.get('term') or {'lines': [], 'cur': '', 'tap': 0, 'glance': 0, 'idle': 0}
+        t = self.__dict__.get('term') or {'lines': [], 'cur': '', 'tap': 0, 'glance': 0, 'idle': 0, 'look': 0}
+        parts = self.desk_parts()
+        hc, k, R = parts[6], parts[7], parts[8]
+        hx, hy, k = hc[0] / R, hc[1] / R, k / R
+        dips = tuple(1.5 * t['tap'] if (len(t['cur']) + i) % 2 else 0 for i in range(2))  # one hand, then the other
+        pic = self.desk_frame(dips, t.get('look', 0))
         px = self.px
         pad, top = px * 2, px // 2  # room to the right for the code, and above for its lines
         im = Image.new('RGBA', (px + 2 * pad, px + top), (0, 0, 0, 0))
-        o = pad + (px - base.width) // 2, top + px - base.height
-        im.alpha_composite(base, o)
-        im.alpha_composite(lid, o)
-        for i, (a, sh) in enumerate(zip(arms, shoulders)):  # typing: one hand then the other taps a key
-            dip = 3 if (t['tap'] and (len(t['cur']) + i) % 2) else 0
-            im.alpha_composite(a.rotate(dip, Image.BICUBIC, center=sh), o)
-        if t['glance']:  # a glance at the code: a small look up, the head turning on his neck (so it stays on)
-            hb = head.getbbox() or (0, 0, 1, 1)
-            im.alpha_composite(head.rotate(7, Image.BICUBIC, center=((hb[0] + hb[2]) / 2, hb[3])), o)
-        else:  # facing his laptop: head straight, where it belongs
-            im.alpha_composite(head, o)
+        o = pad + (px - pic.width) // 2, top + px - pic.height
+        im.alpha_composite(pic, o)
         # the terminal: lines above, the one being typed with its underscore, beside and above his head
         font = self.app.__dict__.get('term_font')
         if font is None:
@@ -1075,6 +1134,15 @@ def staff_ends(img):
 def pet_px(settings):
     """On-screen pet size in pixels: base size x size setting x display scaling."""
     return int(SIZE * settings['size'] * DPI_SCALE)
+
+
+def turned(img, deg, center=None):
+    """img turned deg counter-clockwise about center, without dark seams: turning a picture with see-through
+    edges mixes in the black of its empty pixels unless it is premultiplied first."""
+    from PIL import Image
+    if not deg:
+        return img
+    return img.convert('RGBa').rotate(deg, Image.BICUBIC, center=center).convert('RGBA')
 
 
 def unstretched(img, app):
