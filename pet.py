@@ -313,6 +313,7 @@ STEP = 1 / 30  # seconds per movement step
 ONCE = ('land', 'fall')  # pack animations that play through once and hold their last picture
 FLOOR_STATES = ('walk', 'run', 'idle', 'sit', 'lie', 'dance')
 STAND_INS = {'run': ('walk',), 'chase': ('run', 'walk'), 'lie': ('sit',), 'ceiling': ('drag',)}  # pack lacks a state
+FREE_FALL = ('TDL', 'Green', 'TCO', 'Orange')  # characters whose plain drops keep full gravity (not the steady fall)
 
 
 def cursor_pos():
@@ -634,8 +635,9 @@ class Pet:
             bottom = self.y + px
             # shortcut: Yellow's fall pictures ride a staff, by name: sparkles fly off it, and he always lands softly
             staff = self.app.pack and not self.leap and self.app.settings['character'] == 'Yellow'
-            # a plain drop falls at a steady 10 px a step; throws keep gravity, and so does TDL (by name), always
-            if not self.leap and self.vy >= 0 and self.app.settings['character'] != 'TDL':
+            # a plain drop falls at a steady 10 px a step; throws keep gravity, and so do these characters
+            # (by name), always
+            if not self.leap and self.vy >= 0 and self.app.settings['character'] not in FREE_FALL:
                 self.vy = min(self.vy + GRAVITY, 10)
             else:
                 self.vy += GRAVITY
