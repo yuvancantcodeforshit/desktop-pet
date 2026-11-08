@@ -455,16 +455,8 @@ class Pet:
             self.hx, self.hy = px / 2, px * (5 if leg else 4) / 64
         elif not leg:
             self.held_pose()
-        else:  # grip the tip of the foot nearest the click (the picture is held upside down)
-            img = self.picture()
-            a = img.getchannel('A')
-            dx, dy = (px - img.width) // 2, px - img.height
-            l, t, r, b = img.getbbox() or (0, 0, img.width, img.height)
-            xs = [x for y in range(b - 4, b) for x in range(l, r) if a.getpixel((x, y)) > 128] or [(l + r) / 2]
-            near = min(xs, key=lambda x: abs(x - (mx - self.x - dx)))
-            foot = [x for x in xs if abs(x - near) <= 6]
-            # the picture is turned 180 degrees in its px square, so the foot's spot is mirrored both ways
-            self.hx, self.hy = px - 1 - (dx + sum(foot) / len(foot)), px - 1 - (dy + b - 3)
+        else:  # held upside down by the tip of a foot
+            self.leg_pose()
         self.pv, self.pm = (0.0, 0.0), (mx, my)  # smoothed pointer velocity, last pointer position
         self.follow()
 
@@ -492,6 +484,41 @@ class Pet:
             up = abs(math.degrees(lean)) < 50  # the arm runs down from the hand, not sideways
             cache[key] = hx + dx, hy + dy, lean, up
         return cache[key]
+
+    def foot(self, img):
+        """Where a picture's lowest foot tip ends up on the px square once the picture is turned upside down."""
+        cache = self.app.__dict__.setdefault('feet', {})
+        key = (id(img), self.px)
+        if cache.get(key, (None,))[0] is not img:  # keyed by the picture itself (ids get reused)
+            a = img.getchannel('A')
+            l, t, r, b = a.getbbox() or (0, 0, img.width, img.height)
+            xs = [x for y in range(b - 4, b) for x in range(l, r) if a.getpixel((x, y)) > 128] or [(l + r) / 2]
+            low = [x for x in xs if abs(x - xs[len(xs) // 2]) <= 6]
+            dx, dy = (self.px - img.width) // 2, self.px - img.height
+            # the picture is turned 180 degrees in its px square, so the foot's spot is mirrored both ways
+            cache[key] = img, (self.px - 1 - (dx + sum(low) / len(low)), self.px - 1 - (dy + b - 3))
+        return cache[key][1]
+
+    def leg_pose(self):
+        """Held by the leg: the pack's monkey-bar frames that hang from a raised arm, turned upside down, so an
+        arm hangs and the free leg angles off the held one. The swing picks among them (choppy on purpose): one
+        end of the row swinging one way, the other end the other way, the middle hanging still."""
+        frames = self.app.pack[0]
+        side = 1 if self.dir < 0 else 0
+        pics = [p for p in {id(p): p for p in frames.get('ceiling', ([], []))[side]}.values() if self.grip(p)[3]]
+        pics = pics or [frames['drag'][side][0]]
+        n = len(pics)
+        i = n // 2 if abs(self.om) < 0.4 else max(0, min(n - 1, int((self.om + 3) / 6 * n)))
+        now = time.perf_counter()
+        best = pics[i]
+        if getattr(self, 'lpose', None) is None or (best is not self.lpose[0] and now - self.lpose[1] > 0.12):
+            self.lpose = best, now
+        img = self.lpose[0]
+        if self.app.settings['character'] == 'TCO':  # shortcut, by name: the fire from his held picture's hand
+            img = with_hand_fire(img, frames['drag'][side][0], self)
+        self.hx, self.hy = self.foot(img)
+        self.lean = 0.0
+        return img
 
     def held_pose(self):
         """Held by the hand: the pack's monkey-bar frames (swing) show its body at many angles under one raised
@@ -540,6 +567,8 @@ class Pet:
                 self.calm = 0.0
         if self.state == 'drag' and self.app.pack:
             self.held_pose()
+        elif self.state == 'hang' and self.app.pack:
+            self.leg_pose()
         self.x, self.y = self.prev = mx - self.hx, my - self.hy
 
     def drag(self):
@@ -637,7 +666,7 @@ class Pet:
                 self.sparks = []
                 self.vx, self.vy, self.spin, self.spin_v = 0, 0, 0, 0
                 if back:
-                    self.set('backland', 22)
+                    self.set('backland', 15)
                 else:
                     self.land(hard)
         elif s == 'land':
@@ -651,7 +680,7 @@ class Pet:
                     self.y, self.vy = floor, 0
             if self.timer <= 0:
                 self.land(full=True)
-        elif s == 'backland' and self.timer <= 0:  # rolled over onto its front (see picture): crawls up
+        elif s == 'backland' and self.timer <= 0:  # rolls over onto its front (the get-up's first picture), crawls up
             self.land(full=True)
         elif s in ('walk', 'run'):
             self.x += (2 if s == 'walk' else 4) * speed * self.dir
@@ -748,6 +777,8 @@ class Pet:
             frames, fps = self.app.pack
             if self.state == 'drag':
                 return self.pose[0] if getattr(self, 'pose', None) else self.held_pose()
+            if self.state == 'hang':
+                return self.leg_pose()
             if (s == 'fall' and not self.leap and self.app.settings['character'] == 'TDL'
                     and 'fall' in frames):  # by name: his fall picture is drawn stretched tall; shown at 75% height
                 img = frames['fall'][1 if d < 0 else 0][0]
@@ -756,15 +787,8 @@ class Pet:
                 s = 'ceiling'
             if s == 'crash' and 'land' in frames:  # crashed: face down, the landing animation's first picture
                 return frames['land'][1 if d < 0 else 0][0]
-            if s == 'backland':  # landed on its back: lies a moment, then rolls over onto its front
-                k, side = f - self.since, 1 if d < 0 else 0
-                lay = frames['lie'][side][0]
-                front = frames['land'][side][0] if 'land' in frames else lay
-                if k < 15:  # lies still on its back a moment
-                    return lay
-                # the roll: the back flattens away and the front grows back, like a card turned over
-                roll = ((lay, 0.6), (lay, 0.3), (front, 0.3), (front, 0.6), (front, 0.85))
-                return squashed(*roll[min(len(roll) - 1, (k - 15) * len(roll) // 7)], self.app)
+            if s == 'backland':  # landed on its back: lies there a moment (then step() has it roll over and crawl up)
+                return frames['lie'][1 if d < 0 else 0][0]
             pair = next((frames[k] for k in (s,) + STAND_INS.get(s, ()) if k in frames), frames['idle'])
             seq = pair[1] if d < 0 else pair[0]
             i = int((f - self.since) * fps / 30)
@@ -935,17 +959,33 @@ def unstretched(img, app):
     return cache[id(img)][1]
 
 
-def squashed(img, s, app):
-    """img flattened to s of its height, standing on the same bottom edge (for turning over like a card)."""
+def with_hand_fire(img, held, pet_):
+    """TCO: img with the fire from his held picture's raised hand put on img's raised hand. The fire is the
+    coloured (not black) pixels of the held picture; it keeps its place relative to the hand tip."""
     from PIL import Image
-    cache = app.__dict__.setdefault('squashed', {})
-    key = (id(img), s)
-    if cache.get(key, (None,))[0] is not img:  # keyed by the picture itself (ids get reused)
-        out = Image.new('RGBA', img.size, (0, 0, 0, 0))
-        flat = img.resize((img.width, max(1, round(img.height * s))), Image.LANCZOS)
-        out.alpha_composite(flat, (0, img.height - flat.height))
-        cache[key] = img, out
-    return cache[key][1]
+    cache = pet_.app.__dict__.setdefault('fires', {})
+    key = (id(img), id(held))
+    if cache.get(key, (None, None))[:2] != (img, held):  # keyed by the pictures themselves
+        raw = bytearray(held.tobytes())
+        body = bytearray(raw)
+        for i in range(0, len(raw), 4):
+            if max(raw[i:i + 3]) > 90:  # fire: lit pixels
+                body[i + 3] = 0
+            else:  # body: dark pixels
+                raw[i + 3] = 0
+        fire = Image.frombytes('RGBA', held.size, bytes(raw))
+        body = Image.frombytes('RGBA', held.size, bytes(body))
+        px = pet_.px
+        hx0, hy0 = pet_.grip(body)[:2]  # his hand tip without the fire (on the px square)
+        hx1, hy1 = pet_.grip(img)[:2]
+        dx = round((hx1 - (px - img.width) // 2) - (hx0 - (px - held.width) // 2))  # held picture -> img
+        dy = round((hy1 - (px - img.height)) - (hy0 - (px - held.height)))
+        layer = Image.new('RGBA', img.size, (0, 0, 0, 0))
+        layer.paste(fire, (dx, dy), fire)
+        out = img.copy()
+        out.alpha_composite(layer)
+        cache[key] = img, held, body, out
+    return cache[key][3]
 
 
 def without_sparkles(img, gem):
