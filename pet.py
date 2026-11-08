@@ -674,7 +674,7 @@ class Pet:
 
     def back_pose(self, k, side):
         """Landing on his back, k steps in (1/30 s each), in his own pictures, like a person:
-        0-15 flat on his back (his standing picture laid along the floor);
+        0-15 on his back, one knee bent (a mid-stride walking picture, laid with his back flat on the floor);
         15-26 sitting up (his sit picture); 26-40 up onto a knee, then standing (the last two pictures of his
         get-up: his landing animation's, or Orange's borrowed get-up)."""
         from PIL import Image
@@ -684,7 +684,7 @@ class Pet:
         key = (id(mine), self.px, side)
         if cache.get(key, (None,))[0] is not mine:  # keyed by the picture itself (ids get reused)
             uniq = lambda ps: [q for q in {id(q): q for q in ps}.values()]
-            flat = turned(frames['idle'][side][0], 90 if side == 0 else -90)  # his standing self, flat on his back
+            flat = lying_flat(uniq(frames.get('walk', frames['idle'])[side])[min(2, len(uniq(frames.get('walk', frames['idle'])[side])) - 1)])
             bb = flat.getbbox() or (0, 0, flat.width, flat.height)
             flat = flat.crop((bb[0], bb[1], bb[2], bb[3]))
             lying = Image.new('RGBA', (max(self.px, flat.width), self.px), (0, 0, 0, 0))
@@ -1383,6 +1383,32 @@ def turned(img, deg, center=None):
     if not deg:
         return img
     return img.convert('RGBa').rotate(deg, Image.BICUBIC, center=center).convert('RGBA')
+
+
+def lying_flat(img):
+    """img (a figure standing) turned to lie on its back: head-to-hip line flat along the floor, whichever way
+    keeps the back down and a bent knee up. Cropped to what's drawn."""
+    a = img.getchannel('A')
+    l, t, r, b = a.getbbox() or (0, 0, img.width, img.height)
+    h = b - t
+
+    def mid(y0, y1):  # middle of the solid pixels in these rows
+        pts = [(x, y) for y in range(int(y0), int(y1)) for x in range(l, r) if a.getpixel((x, y)) > 128]
+        return (sum(p[0] for p in pts) / len(pts), sum(p[1] for p in pts) / len(pts)) if pts else ((l + r) / 2, (y0 + y1) / 2)
+    head, hip = mid(t, t + h * 0.2), mid(t + h * 0.5, t + h * 0.58)
+    phi = math.degrees(math.atan2(hip[1] - head[1], hip[0] - head[0]))  # the body's line, screen degrees
+    best = None
+    c = (img.width / 2, img.height / 2)
+    for target in (0, 180):  # head to the left or to the right
+        deg = phi - target  # PIL turns counter-clockwise: a line's screen angle drops by deg
+        out = turned(img, deg, c)
+        bb = out.getbbox() or (0, 0, out.width, out.height)
+        rad = math.radians(deg)
+        y_head = c[1] - (head[0] - c[0]) * math.sin(rad) + (head[1] - c[1]) * math.cos(rad)
+        gap = bb[3] - y_head  # how high his head (and back) sits above the lowest point
+        if best is None or gap < best[0]:
+            best = gap, out.crop(bb)
+    return best[1]
 
 
 def unstretched(img, app):
