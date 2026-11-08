@@ -515,20 +515,21 @@ class Pet:
             self.__dict__.pop('term', None)
         self.since = getattr(self, 'frame', 0)  # pack animations start from their first picture
 
-    def land(self, hard=False, full=False):
+    def land(self, hard=False, full=False, slow=1):
         """Touched down. Packs: a soft landing plays the second half of the landing animation (crouch, stand); a
         hard one crashes face down (its first picture) with a tiny hop, lies a moment, then plays all of it (crawl
-        up, stand). full: all of it now. Blob: quick squash."""
+        up, stand). full: all of it now. slow: played that many times slower. Blob: quick squash."""
         frames = self.pack[0] if self.pack else None
+        self.land_slow = slow
         if frames is None:
             self.set('land', 6)
         elif hard and 'land' in frames:
             self.set('crash', 22)
             self.vy = -3.5  # the body thumps the floor and lifts a few px
         elif 'land' in frames:
-            ticks = round(len(frames['land'][0]) * 30 / self.pack[1])
+            ticks = round(len(frames['land'][0]) * 30 / self.pack[1] * slow)
             skip = 0 if full else ticks // 2
-            self.set('land', max(1, ticks - skip))
+            self.set('land', max(1, ticks - skip + (12 if slow > 1 else 0)))  # a slow landing holds its end a moment
             self.since = self.frame - skip  # start partway through
         else:
             self.set('idle')
@@ -793,6 +794,8 @@ class Pet:
                 self.vx, self.vy, self.spin, self.spin_v = 0, 0, 0, 0
                 if back:
                     self.set('backland', 15)
+                elif tdl:  # TDL's landing: the whole thing, slow, so it lands with weight
+                    self.land(full=True, slow=3)
                 else:
                     self.land(hard)
         elif s == 'land':
@@ -920,7 +923,7 @@ class Pet:
                 return frames['lie'][1 if d < 0 else 0][0]
             pair = next((frames[k] for k in (s,) + STAND_INS.get(s, ()) if k in frames), frames['idle'])
             seq = pair[1] if d < 0 else pair[0]
-            i = int((f - self.since) * fps / 30)
+            i = int((f - self.since) * fps / 30 / (getattr(self, 'land_slow', 1) if s == 'land' else 1))
             img = seq[min(i, len(seq) - 1) if s in ONCE else i % len(seq)]
             return img
         step = 0
@@ -1280,6 +1283,7 @@ def unstretched(img, app):
     cache = app.__dict__.setdefault('unstretched', {})
     if cache.get(id(img), (None,))[0] is not img:  # keyed by the picture itself (ids get reused)
         r = max(1.0, img.height / img.width)  # it was fitted by its height, so it came out narrow
+        r *= 1.12  # a touch bigger: squashed back to his width alone, he looked smaller than his normal self
         cache[id(img)] = img, img.resize((round(img.width * r), round(img.height * r * 0.75)), Image.LANCZOS)
     return cache[id(img)][1]
 
