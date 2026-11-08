@@ -40,7 +40,17 @@ THEMES = {
     'Forest':   ('#13201a', '#1d3328', '#7ecf8f', '#ffffff', '#8fae9a'),
     'Sunset':   ('#2a1a1f', '#3d2630', '#ff9e7a', '#ffffff', '#b8949e'),
     'Grape':    ('#1d1730', '#2b2245', '#b9a3f0', '#ffffff', '#9d93b8'),
+    'Rose':     ('#241519', '#341f26', '#f29fc4', '#ffffff', '#b99aa6'),
+    'Mocha':    ('#1e1815', '#2d2420', '#e0a96d', '#ffffff', '#a8998c'),
+    'Slate':    ('#1a1d23', '#262b34', '#7aa2f7', '#ffffff', '#8e96a8'),
+    'Mint':     ('#101f1c', '#17302b', '#4fc1b3', '#ffffff', '#86aaa4'),
+    'Nord':     ('#2e3440', '#3b4252', '#88c0d0', '#eceff4', '#9aa5b8'),
+    'Crimson':  ('#1f1012', '#321a1d', '#ff6b6b', '#ffffff', '#b58f93'),
+    'Amoled':   ('#000000', '#121212', '#57c8ff', '#ffffff', '#8a8a8a'),
     'Light':    ('#f3f3f3', '#ffffff', '#2f60d8', '#1a1a1a', '#666666'),
+    'Cream':    ('#f6f1e7', '#fffaf0', '#c0763a', '#2a2118', '#7a6c5c'),
+    'Sky':      ('#eaf2fb', '#ffffff', '#2f7fd8', '#14202e', '#5f7287'),
+    'Blossom':  ('#fbeef2', '#ffffff', '#d8587f', '#2b1a20', '#7d6068'),
 }
 DEFAULTS = {'color': '#7ecf8f', 'speed': 1.0, 'size': 1.0, 'pets': 1, 'monitors': [], 'character': '',
             'style': 'Blob', 'theme': 'Midnight', 'accent': '', 'font': 'Segoe UI Variable', 'off': [], 'chars': {},
@@ -1878,6 +1888,8 @@ def selftest():
         for s in ('walk', 'climb', 'sit'):  # walk has its own image, climb/sit fall back to idle
             p.state = s
             p.draw()
+        for n in THEMES:  # every theme builds
+            panel.change('theme', n)
         panel.change('theme', 'Light')
         panel.change('font', 'Bahnschrift')
         app.set_visible(False)
