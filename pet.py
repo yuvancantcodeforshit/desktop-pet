@@ -984,7 +984,7 @@ class Pet:
                 return pics[min(len(pics) - 1, (f - self.since) // 5)]
             pair = next((frames[k] for k in (s,) + STAND_INS.get(s, ()) if k in frames), frames['idle'])
             seq = pair[1] if d < 0 else pair[0]
-            i = int((f - self.since) * fps / 30 / (getattr(self, 'land_slow', 1) if s == 'land' else 1))
+            i = int((f - self.since + self.acc / STEP) * fps / 30 /(getattr(self, 'land_slow', 1) if s == 'land' else 1))
             img = seq[min(i, len(seq) - 1) if s in ONCE else i % len(seq)]
             return img
         step = 0
@@ -1008,8 +1008,8 @@ class Pet:
         hang = self.state == 'hang'
         held = self.state in ('drag', 'hang')
         # turn: swing about the held hand or foot, or tumble in the air about the middle
-        turn = (round(math.degrees(self.th - self.lean) / 2) * 2 if held else
-                round(self.spin / 4) * 4 % 360 if self.state == 'fall' else 0)
+        turn = (round(math.degrees(self.th - self.lean)) if held else
+                round(self.spin) % 360 if self.state == 'fall' else 0)
         key = (id(img), top, hang, turn, (round(self.hx), round(self.hy)) if held else None)
         shown = self.shown.get(key)
         if shown is None:
@@ -1029,7 +1029,7 @@ class Pet:
                 canvas, dx, dy = big.crop((l, t, r, b)), l - px, t - px
             # premultiplied, as Windows wants
             shown = canvas.convert('RGBa').tobytes('raw', 'BGRa'), canvas.width, canvas.height, dx, dy
-            if len(self.shown) > 600:
+            if len(self.shown) > 1500:
                 self.shown.clear()
             self.shown[key] = shown
         data, w, h, dx, dy = shown
