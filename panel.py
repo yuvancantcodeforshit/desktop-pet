@@ -1266,6 +1266,8 @@ class SettingsWindow(QWidget):
     def sec_general(self, lay):
         self.switch_row(lay, 'Start with Windows', 'Open Desktop Pet automatically when you log in.',
                         self.core.autostart(), self.core.autostart)
+        self.switch_row(lay, 'Smoother animations', 'Blend extra frames between each pair (twice as fine, may look soft).',
+                        self.app.settings['smooth'], lambda on: self.change('smooth', on))
         self.switch_row(lay, 'Advanced options', 'Show the deep options: physics, crash height, typed lines.',
                         self.app.settings['advanced'], self.set_advanced)
 
