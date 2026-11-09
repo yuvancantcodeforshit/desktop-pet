@@ -54,7 +54,7 @@ THEMES = {
 }
 DEFAULTS = {'color': '#7ecf8f', 'speed': 1.0, 'size': 1.0, 'pets': 1, 'monitors': [], 'character': '',
             'style': 'Blob', 'theme': 'Midnight', 'accent': '', 'font': 'Segoe UI Variable', 'off': [], 'chars': {},
-            'gravity': 1.0, 'throw': 1.0, 'damping': 1.0, 'spin': 1.0, 'advanced': False, 'schedule': {'on': False, 'from': 22, 'to': 7}, 'roster': {'': 1}}
+            'gravity': 1.0, 'throw': 1.0, 'damping': 1.0, 'spin': 1.0, 'advanced': False, 'smooth': False, 'schedule': {'on': False, 'from': 22, 'to': 7}, 'roster': {'': 1}}
 # things a pet may do on its own; Settings > Home > Behaviour turns them off (saved in 'off')
 ACTIONS = ('walk', 'run', 'sit', 'lie', 'dance', 'climb', 'chase', 'jump')
 # per-character options (Settings > Characters > Tweaks): saved as settings['chars'][name][key]
@@ -196,7 +196,7 @@ def load_settings(path=None):
         'font': lambda v: isinstance(v, str) and 0 < len(v) <= 60,
         'off': lambda v: isinstance(v, list) and all(a in ACTIONS for a in v),
         'gravity': num(0.5, 2), 'throw': num(0.3, 2), 'damping': num(0.4, 3), 'spin': num(0, 2),  # Settings > Physics
-        'advanced': lambda v: isinstance(v, bool),
+        'advanced': lambda v: isinstance(v, bool), 'smooth': lambda v: isinstance(v, bool),
     }
     for k, ok in checks.items():
         if k in saved and ok(saved[k]):
@@ -1332,6 +1332,25 @@ def turned(img, deg, center=None):
     return img.convert('RGBa').rotate(deg, Image.BICUBIC, center=center).convert('RGBA')
 
 
+def smoothed(pack):
+    """The pack with a blended picture between each pair of frames, and twice the fps, so it plays at the same
+    speed but twice as finely. Long slow loops (idle) and one-shots' ends are left alone."""
+    from PIL import Image
+    frames, fps = pack
+    mix = lambda a, b: Image.blend(a.convert('RGBa'), b.convert('RGBa'), 0.5).convert('RGBA')
+    out = {}
+    for state, pair in frames.items():
+        seqs = []
+        for seq in pair:
+            if not 2 <= len(seq) <= 60 or any(i.size != seq[0].size for i in seq):
+                seqs.append([x for i in seq for x in (i, i)])  # same picture twice: timing stays in step
+                continue
+            nxt = seq[1:] + ([] if state in ONCE else seq[:1])
+            seqs.append([x for i, n in zip(seq, nxt + seq[-1:]) for x in (i, mix(i, n) if n is not i else i)])
+        out[state] = tuple(seqs)
+    return out, fps * 2
+
+
 def unstretched(img, app):
     """TDL's fall picture, drawn stretched tall (152 px for a 128 px character): back to his width, 75% height."""
     from PIL import Image
@@ -1596,7 +1615,7 @@ class App:
         """((frames, fps) or None for the blob, the pack's scale) for one character at the current size."""
         path = os.path.join(PACKS_DIR, name)
         scale = packs.scale_of(packs.read_meta(path)) if name and os.path.isdir(path) else 1
-        key = (name, pet_px(self.settings), scale)
+        key = (name, pet_px(self.settings), scale, self.settings['smooth'])
         if key not in self.pack_cache:  # sliders call apply() many times a second: never reload images needlessly
             if len(self.pack_cache) > 12:  # the Size slider makes a key per step
                 self.pack_cache.clear()
@@ -1608,6 +1627,8 @@ class App:
                     pack = None  # broken pack: fall back to the blob rather than crash the pets
                 if pack and 'idle' not in pack[0]:
                     pack = None
+                if pack and self.settings['smooth']:
+                    pack = smoothed(pack)
             self.pack_cache[key] = pack
         return self.pack_cache[key], scale
 
