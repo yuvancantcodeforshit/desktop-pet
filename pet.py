@@ -1337,7 +1337,14 @@ def smoothed(pack):
     speed but twice as finely. Long slow loops (idle) and one-shots' ends are left alone."""
     from PIL import Image
     frames, fps = pack
-    mix = lambda a, b: Image.blend(a.convert('RGBa'), b.convert('RGBa'), 0.5).convert('RGBA')
+    from PIL import ImageChops, ImageStat
+    def mix(a, b):
+        """Half way between two pictures, or just a again when they differ too much (a blend would show a ghost)."""
+        ma, mb = (i.getchannel('A').point(lambda v: 255 if v > 128 else 0) for i in (a, b))
+        union = ImageStat.Stat(ImageChops.lighter(ma, mb)).sum[0] or 1
+        if ImageStat.Stat(ImageChops.darker(ma, mb)).sum[0] / union < 0.55:  # overlap of the two silhouettes
+            return a
+        return Image.blend(a.convert('RGBa'), b.convert('RGBa'), 0.5).convert('RGBA')
     out = {}
     for state, pair in frames.items():
         seqs = []
