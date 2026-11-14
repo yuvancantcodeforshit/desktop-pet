@@ -220,8 +220,11 @@ def save_settings(s, path=None):
 
 def autostart(enable=None):
     """Read (enable=None) or set Windows' 'run at login' entry: the exe, or pythonw + this file when run from source."""
-    cmd = (f'"{sys.executable}"' if FROZEN else
-           f'"{os.path.join(os.path.dirname(sys.executable), "pythonw.exe")}" "{os.path.abspath(__file__)}"') + ' --startup'
+    exe_dir = os.path.dirname(sys.executable)
+    pyw = os.path.join(exe_dir, 'pythonw.exe')
+    if not os.path.exists(pyw):  # newer Python installs ship it renamed
+        pyw = os.path.join(exe_dir, 'Desktop Pet.exe')
+    cmd = (f'"{sys.executable}"' if FROZEN else f'"{pyw}" "{os.path.abspath(__file__)}"') + ' --startup'
     with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY, 0, winreg.KEY_READ | winreg.KEY_SET_VALUE) as k:
         if enable:
             winreg.SetValueEx(k, 'DesktopPet', 0, winreg.REG_SZ, cmd)
