@@ -8,16 +8,14 @@ Owner: terse replies (ultracave, max 5 list items, one next action). Windows, Po
 - `main` = `origin/main` at `2dde049`, clean, no open PRs. `python pet.py --selftest` prints `selftest ok` (~17 s).
 - Works: physics at 30 Hz (`STEP`), Settings window (`panel.py`, PySide6, tabs Home/Characters/Customize/Settings), packs (Alan Becker Yellow/Blue/Green/Orange/Purple/Red/TCO/TDL/victim), Smoother animations toggle (setting `smooth`, Settings > General), single-instance lock.
 - Removed on purpose: back landing (PR #68), Yellow-only tweaks (PR #69). Yellow still sits at his laptop (`Pet.laptop()`, `desk_parts`).
-- Half-done: "run at login" (`autostart()`, `pet.py:221`) used `pythonw.exe`, which is gone from `C:\Users\Yuvan\AppData\Local\Python\pythoncore-3.14-64\`. Fix is on branch `autostart-fallback` (`cb6ec0c`, falls back to `Desktop Pet.exe`), NOT merged to `main`. Login entry is off now.
+- Run at login: `autostart()` falls back to `Desktop Pet.exe` when `pythonw.exe` is missing (PR #73, merged). Not yet tested through the Settings toggle. Login entry is off now.
 - Stale: `README.md` says the Settings window is CustomTkinter. It is PySide6.
 - Many merged feature branches remain on origin (`back-*`, `desk-*`, ...). Harmless.
 
 ## 2. Open tasks
-1. Review and merge `autostart-fallback` (PR, then main). Test: toggle Settings > General > Start with Windows, then read `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` value `DesktopPet`.
+1. Test run at login: toggle Settings > General > Start with Windows, then read `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` value `DesktopPet`.
 2. Click the Start menu shortcut once to confirm it launches (only the same exe and args were tested by hand). Shortcut: `%APPDATA%\Microsoft\Windows\Start Menu\Programs\Desktop Pet.lnk`.
 3. Optional: update README (PySide6 panel; drop release/signing/updater text, see rule 5).
-4. Optional: `~/.claude/projects/C--Users-Yuvan-OneDrive-Documents-desktop-pet/memory/` is empty. Rules live in the old `...-Documents-desktop-pet/memory/`. Copy them over.
-
 ## 3. Files
 - `pet.py` (~1900 lines): `Pet` (state machine, physics, drawing), `App` (tray, windows, settings), `show_layered` (per-pixel-alpha window), `selftest()`, settings load/save, updater.
 - `panel.py` (~1230 lines): Settings window, search index, themes.
