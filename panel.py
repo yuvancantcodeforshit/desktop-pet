@@ -41,6 +41,13 @@ SEARCH = (
     ('Font', 'Customize', 'font text typeface', 'customize', 'Font', None, False),
     ('Start with Windows', 'Settings > General', 'startup autostart login boot windows', 'settings', None, 'General', False),
     ('Advanced options', 'Settings > General', 'advanced simple deep options', 'settings', None, 'General', False),
+    ('Smoother animations', 'Settings > General', 'smooth animation frames blend', 'settings', None, 'General', False),
+    ('Bring pets back on launch', 'Settings > General', 'restore launch open bring back pets start', 'settings', None, 'General', False),
+    ('Ground shadow', 'Settings > General', 'shadow ground floor', 'settings', None, 'General', False),
+    ('Idle breathing', 'Settings > General', 'breathe breathing idle rest', 'settings', None, 'General', False),
+    ('Hide in fullscreen', 'Settings > General', 'fullscreen game video hide pause', 'settings', None, 'General', False),
+    ('Battery saver', 'Settings > General', 'battery power saver laptop frame rate', 'settings', None, 'General', False),
+    ('Hide and show hotkey', 'Settings > General', 'hotkey shortcut keyboard ctrl alt p hide show', 'settings', None, 'General', False),
     ('Screens', 'Which monitors pets walk on', 'screen monitor display', 'settings', None, 'Screens', False),
     ('Physics', 'Gravity, throw, swing, spin', 'physics gravity throw swing damping spin', 'settings', None, 'Physics', True),
     ('Updates', 'Settings', 'update version check', 'settings', None, 'Updates', False),
@@ -212,6 +219,7 @@ class SettingsWindow(QWidget):
         self.open_sections = {'General'}
         self.status = ''        # message on the Characters tab (import result)
         self.thumbs = {}        # (pack name, px) -> loaded frames, kept for the window's life
+        self.pixmaps = {}       # preview pictures already converted for Qt
         self.frame = 0
         self.drag_from = None
         self.fades = {}         # running child fades: slot -> (animation, clean-up)
@@ -225,7 +233,8 @@ class SettingsWindow(QWidget):
         self.mica = sys.getwindowsversion().build >= 22621
         self.restyle()
         QShortcut(QKeySequence('Ctrl+F'), self, lambda: self.search.setFocus())
-        self.anim = self.every(100, self.animate)
+        self.shown_pic = None   # the preview picture on show now
+        self.anim = self.every(33, self.animate)
         self.place()
         self.show()
         self.round_corners()
@@ -761,7 +770,8 @@ class SettingsWindow(QWidget):
         key = (name, int(size * dpr))
         if key not in self.thumbs:
             try:
-                self.thumbs[key] = packs.load_frames(os.path.join(self.core.PACKS_DIR, name), key[1])
+                self.thumbs[key] = packs.load_frames(os.path.join(self.core.PACKS_DIR, name), key[1],
+                                                      only=('idle', 'walk'))  # all a preview shows
             except Exception:
                 self.thumbs[key] = None
         frames = self.thumbs[key]
@@ -791,17 +801,30 @@ class SettingsWindow(QWidget):
         if not self.preview or not self.isVisible():
             return
         s = self.app.settings
-        self.frame += 3
+        self.frame += 1  # 30 a second
         px = self.preview_px()
         if self.app.pack:
             frames = self.pack_frames(s['character'], px)
-            if frames:
-                seq = frames[0]['walk' if 'walk' in frames[0] else 'idle'][0]
-                pm = self.core.to_pixmap(seq[int(self.frame * frames[1] / 30 * s['speed']) % len(seq)])
-                pm.setDevicePixelRatio(self.devicePixelRatioF())
-                self.preview.setPixmap(pm)
+            if not frames:
+                return
+            seq = frames[0]['walk' if 'walk' in frames[0] else 'idle'][0]
+            pic = seq[int(self.frame * frames[1] / 30 * s['speed']) % len(seq)]
         else:
-            self.preview.setPixmap(self.blob_pixmap(px, 0 if self.frame % 150 < 6 else 150))  # blink now and then
+            pic = (px, s['color'], s['style'], self.frame % 150 < 6)  # blink now and then
+        if pic is self.shown_pic or (not self.app.pack and pic == self.shown_pic):
+            return  # same picture as last time: nothing to do
+        self.shown_pic = pic
+        pm = self.pixmaps.get(id(pic) if self.app.pack else pic)  # each picture is converted once
+        if pm is None or (self.app.pack and pm[0] is not pic):
+            if len(self.pixmaps) > 400:
+                self.pixmaps.clear()
+            if self.app.pack:
+                made = self.core.to_pixmap(pic)
+                made.setDevicePixelRatio(self.devicePixelRatioF())
+            else:
+                made = self.blob_pixmap(px, 0 if pic[3] else 150)
+            pm = self.pixmaps[id(pic) if self.app.pack else pic] = (pic, made)
+        self.preview.setPixmap(pm[1])
 
     # --- Home ---
     def page_home(self):
@@ -1266,8 +1289,20 @@ class SettingsWindow(QWidget):
     def sec_general(self, lay):
         self.switch_row(lay, 'Start with Windows', 'Open Desktop Pet automatically when you log in.',
                         self.core.autostart(), self.core.autostart)
-        self.switch_row(lay, 'Smoother animations', 'Blend extra frames between each pair (twice as fine, may look soft).',
+        self.switch_row(lay, 'Smoother animations', 'Adds an in-between picture after each frame: twice as fine. Loads a little slower.',
                         self.app.settings['smooth'], lambda on: self.change('smooth', on))
+        app = self.app
+        after = {'fullscreen': lambda: (app.hold('fullscreen', False), setattr(app, 'dirty', True), app.wake()),
+                 'battery': app.check_power, 'hotkey': app.set_hotkey}  # what else a switch has to set off
+        for key, title, desc in (
+                ('restore', 'Bring pets back on launch', 'Opening Desktop Pet brings back the pets you had last time.'),
+                ('shadow', 'Ground shadow', 'A soft shadow under a standing pet.'),
+                ('breathe', 'Idle breathing', 'A resting pet rises and sinks a little, slowly.'),
+                ('fullscreen', 'Hide in fullscreen', 'Pets hide and stop while a game or video fills the screen.'),
+                ('battery', 'Battery saver', 'On battery: half the frame rate and calmer pets.'),
+                ('hotkey', 'Hide and show hotkey', 'Ctrl+Alt+P hides or shows every pet from anywhere.')):
+            self.switch_row(lay, title, desc, app.settings[key],
+                            lambda on, k=key: (self.change(k, on), after.get(k, lambda: None)()))
         self.switch_row(lay, 'Advanced options', 'Show the deep options: physics, crash height, typed lines.',
                         self.app.settings['advanced'], self.set_advanced)
 

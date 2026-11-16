@@ -2,19 +2,19 @@
 Run: pythonw pet.py   (right-click a pet for Settings / Add / Remove / Quit; tray icon too)
 """
 import ctypes, ctypes.wintypes, hashlib, io, json, math, os, random, re, shutil, subprocess, sys, tempfile, threading, time
-import urllib.request, winreg
+import traceback, urllib.request, winreg
 
 import packs
-from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QAction, QCursor, QIcon, QImage, QPixmap
+from PySide6.QtCore import QAbstractNativeEventFilter, QObject, QPointF, QRectF, Qt, QTimer, Signal
+from PySide6.QtGui import (QAction, QBrush, QColor, QCursor, QIcon, QImage, QPainter, QPixmap,
+                           QRadialGradient, QTransform)
 from PySide6.QtWidgets import QApplication, QMenu, QSystemTrayIcon, QWidget
 
 try:  # sharp text and images: draw at the real screen resolution instead of letting Windows stretch a blurry copy
     ctypes.windll.shcore.SetProcessDpiAwareness(2)  # per-monitor aware; must happen before any window exists
 except (AttributeError, OSError):
     ctypes.windll.user32.SetProcessDPIAware()
-DPI_SCALE = ctypes.windll.user32.GetDpiForSystem() / 96
-ctypes.windll.winmm.timeBeginPeriod(1)  # 1 ms timer: Windows' default 15.6 ms tick held Tk's timer to ~43 fps  # e.g. 1.25 on a 125% display; pets grow to match
+DPI_SCALE = ctypes.windll.user32.GetDpiForSystem() / 96  # e.g. 1.25 on a 125% display; pets grow to match
 
 VERSION = '1.0.4'        # bump before each release; release.ps1 reads it
 REPO = 'yuvancantcodeforshit/desktop-pet'
@@ -32,7 +32,27 @@ SETTINGS_DIR = os.path.join(os.environ.get('APPDATA') or os.path.expanduser('~')
 SETTINGS_FILE = os.path.join(SETTINGS_DIR, 'settings.json')
 PACKS_DIR = os.path.join(SETTINGS_DIR, 'characters')
 CHARACTER_FILE = os.path.join(SETTINGS_DIR, 'character.png')  # single image from v1.0.3, moved into a pack on start
+LOG_FILE = os.path.join(SETTINGS_DIR, 'log.txt')
 BLOB_STYLES = ('Blob', 'Cat', 'Ghost', 'Bunny')
+logged = 0
+
+
+def log_error(kind, err, tb):
+    """Errors go to log.txt (pythonw shows none): 20 a run at most, and the file starts over past 200 KB."""
+    global logged
+    text = ''.join(traceback.format_exception(kind, err, tb))
+    if sys.__stderr__:
+        sys.__stderr__.write(text)
+    logged += 1
+    if logged > 20:
+        return
+    try:
+        os.makedirs(SETTINGS_DIR, exist_ok=True)
+        big = os.path.exists(LOG_FILE) and os.path.getsize(LOG_FILE) > 200_000
+        with open(LOG_FILE, 'w' if big else 'a', encoding='utf-8') as f:
+            f.write(f'{time.strftime("%Y-%m-%d %H:%M:%S")}\n{text}\n')
+    except OSError:
+        pass
 # window themes: background, card, accent, text, muted text
 THEMES = {
     'Midnight': ('#1c1c1c', '#2b2b2b', '#57c8ff', '#ffffff', '#9a9a9a'),
@@ -54,7 +74,9 @@ THEMES = {
 }
 DEFAULTS = {'color': '#7ecf8f', 'speed': 1.0, 'size': 1.0, 'pets': 1, 'monitors': [], 'character': '',
             'style': 'Blob', 'theme': 'Midnight', 'accent': '', 'font': 'Segoe UI Variable', 'off': [], 'chars': {},
-            'gravity': 1.0, 'throw': 1.0, 'damping': 1.0, 'spin': 1.0, 'advanced': False, 'smooth': False, 'schedule': {'on': False, 'from': 22, 'to': 7}, 'roster': {'': 1}}
+            'gravity': 1.0, 'throw': 1.0, 'damping': 1.0, 'spin': 1.0, 'advanced': False, 'smooth': False, 'schedule': {'on': False, 'from': 22, 'to': 7}, 'roster': {'': 1},
+            'shadow': True, 'breathe': True, 'restore': True, 'hotkey': True, 'fullscreen': True, 'battery': True}
+SWITCHES = ('advanced', 'smooth', 'shadow', 'breathe', 'restore', 'hotkey', 'fullscreen', 'battery')  # on/off settings
 # things a pet may do on its own; Settings > Home > Behaviour turns them off (saved in 'off')
 ACTIONS = ('walk', 'run', 'sit', 'lie', 'dance', 'climb', 'chase', 'jump')
 # per-character options (Settings > Characters > Tweaks): saved as settings['chars'][name][key]
@@ -196,7 +218,7 @@ def load_settings(path=None):
         'font': lambda v: isinstance(v, str) and 0 < len(v) <= 60,
         'off': lambda v: isinstance(v, list) and all(a in ACTIONS for a in v),
         'gravity': num(0.5, 2), 'throw': num(0.3, 2), 'damping': num(0.4, 3), 'spin': num(0, 2),  # Settings > Physics
-        'advanced': lambda v: isinstance(v, bool), 'smooth': lambda v: isinstance(v, bool),
+        **{k: lambda v: isinstance(v, bool) for k in SWITCHES},
     }
     for k, ok in checks.items():
         if k in saved and ok(saved[k]):
@@ -315,25 +337,69 @@ gdi32.SelectObject.argtypes = [_vp, _vp]
 gdi32.DeleteObject.argtypes = gdi32.DeleteDC.argtypes = [_vp]
 
 
-def show_layered(hwnd, data, w, h, x=None, y=None):
-    """Put w x h premultiplied BGRA bytes on a layered window, moving it to (x, y) in the same call
-    (moving and redrawing separately made the pet stutter)."""
-    screen = user32.GetDC(None)
-    mem = gdi32.CreateCompatibleDC(screen)
-    bits = _vp()
-    bmp = gdi32.CreateDIBSection(screen, ctypes.byref(BITMAPINFOHEADER(ctypes.sizeof(BITMAPINFOHEADER), w, -h, 1, 32)),
-                                 0, ctypes.byref(bits), None, 0)
-    if bmp and bits:
-        ctypes.memmove(bits, data, len(data))
-        old = gdi32.SelectObject(mem, bmp)
-        dst = None if x is None else ctypes.byref(ctypes.wintypes.POINT(int(x), int(y)))
-        user32.UpdateLayeredWindow(hwnd, screen, dst, ctypes.byref(ctypes.wintypes.SIZE(w, h)), mem,
+class Surface:
+    """One pet window's picture: a 32-bit bitmap that Windows shows with per-pixel transparency
+    (UpdateLayeredWindow). Kept for the pet's life and painted straight into by Qt: no copy and no new bitmap
+    per frame. Moving and redrawing happen in one call (separately, the pet stuttered)."""
+
+    def __init__(self, hwnd):
+        self.hwnd, self.w, self.h, self.bmp, self.img = hwnd, 0, 0, None, None
+        self.dc = gdi32.CreateCompatibleDC(None)
+
+    def fit(self, w, h):
+        """The QImage to paint on, with room for w x h (it grows, never shrinks). None if Windows gave no bitmap."""
+        if w > self.w or h > self.h or self.img is None:
+            self.free_bitmap()
+            self.w, self.h = max(self.w, w + 32), max(self.h, h + 32)
+            bits = _vp()
+            head = BITMAPINFOHEADER(ctypes.sizeof(BITMAPINFOHEADER), self.w, -self.h, 1, 32)
+            self.bmp = gdi32.CreateDIBSection(self.dc, ctypes.byref(head), 0, ctypes.byref(bits), None, 0)
+            if not (self.bmp and bits):
+                self.bmp = None
+                return None
+            self.old = gdi32.SelectObject(self.dc, self.bmp)
+            self.buf = (ctypes.c_ubyte * (self.w * self.h * 4)).from_address(bits.value)
+            self.img = QImage(self.buf, self.w, self.h, self.w * 4, QImage.Format_ARGB32_Premultiplied)
+        return self.img
+
+    def show(self, w, h, x, y, alpha=255):
+        """Show the top-left w x h of the bitmap at screen (x, y), the whole pet faded to alpha (0-255)."""
+        self.alpha = alpha
+        user32.UpdateLayeredWindow(self.hwnd, None, ctypes.byref(ctypes.wintypes.POINT(x, y)),
+                                   ctypes.byref(ctypes.wintypes.SIZE(w, h)), self.dc,
                                    ctypes.byref(ctypes.wintypes.POINT(0, 0)), 0,
-                                   ctypes.byref(BLENDFUNCTION(0, 0, 255, 1)), 2)  # AC_SRC_ALPHA, ULW_ALPHA
-        gdi32.SelectObject(mem, old)
-        gdi32.DeleteObject(bmp)
-    gdi32.DeleteDC(mem)
-    user32.ReleaseDC(None, screen)
+                                   ctypes.byref(BLENDFUNCTION(0, 0, alpha, 1)), 2)  # AC_SRC_ALPHA, ULW_ALPHA
+
+    def move(self, x, y):
+        """Same picture, new place: nothing is painted (SetWindowPos would cost four times as much)."""
+        user32.UpdateLayeredWindow(self.hwnd, None, ctypes.byref(ctypes.wintypes.POINT(x, y)), None, None, None, 0,
+                                   ctypes.byref(BLENDFUNCTION(0, 0, self.alpha, 1)), 2)
+
+    def free_bitmap(self):
+        if self.bmp:
+            self.img = self.buf = None
+            gdi32.SelectObject(self.dc, self.old)
+            gdi32.DeleteObject(self.bmp)
+            self.bmp = None
+
+    def free(self):
+        self.free_bitmap()
+        gdi32.DeleteDC(self.dc)
+
+
+def feet_of(img):
+    """(left, right) of a picture's solid pixels in its lowest tenth: what stands on the ground."""
+    l, t, r, b = img.getbbox() or (0, 0, img.width, img.height)
+    low = img.crop((0, b - max(2, (b - t) // 10), img.width, b)).getbbox()
+    return (low[0], low[2]) if low else (l, r)
+
+
+def qimage(img):
+    """PIL RGBA picture -> QImage in the form Windows wants (premultiplied BGRA)."""
+    data = img.convert('RGBa').tobytes('raw', 'BGRa')
+    q = QImage(data, img.width, img.height, img.width * 4, QImage.Format_ARGB32_Premultiplied)
+    q.data = data  # the QImage only points at these bytes: keep them alive with it
+    return q
 
 
 # --- updates ---
@@ -413,6 +479,10 @@ def single_instance():
 STEP = 1 / 30  # seconds per movement step
 ONCE = ('land', 'fall')  # pack animations that play through once and hold their last picture
 FLOOR_STATES = ('walk', 'run', 'idle', 'sit', 'lie', 'dance')
+SOFT = FLOOR_STATES + ('land', 'getup')  # a change between two of these fades from one picture to the next
+MOVING = ('walk', 'run', 'climb', 'ceiling')  # their pictures advance with the distance covered
+GLIDE = MOVING + ('fall', 'crash')  # drawn at quarter-pixel positions, so slow movement does not judder
+PAUSABLE = FLOOR_STATES + ('climb', 'ceiling')  # "Pause pets" freezes these; a pet in the air still comes down
 STAND_INS = {'run': ('walk',), 'chase': ('run', 'walk'), 'lie': ('sit',), 'ceiling': ('drag',)}  # pack lacks a state
 FREE_FALL = ('TDL', 'Green', 'TCO', 'Orange')  # characters whose plain drops keep full gravity (not the steady fall)
 
@@ -433,23 +503,64 @@ ctypes.windll.dwmapi.DwmGetWindowAttribute.argtypes = [ctypes.c_void_p, ctypes.w
 SHELL_CLASSES = {'Progman', 'WorkerW', 'Shell_TrayWnd', 'Shell_SecondaryTrayWnd'}
 
 
-def active_window():
-    """(hwnd, left, top, right) of the window in front, if pets can stand on it (not ours, not minimized,
-    maximized or the desktop/taskbar); else None."""
-    h = user32.GetForegroundWindow()
-    if not h or user32.IsIconic(h) or user32.IsZoomed(h):
+ENUMPROC = ctypes.WINFUNCTYPE(ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p)
+user32.EnumWindows.argtypes = [ENUMPROC, ctypes.c_void_p]
+user32.IsWindowVisible.argtypes = user32.GetWindowTextLengthW.argtypes = [ctypes.c_void_p]
+user32.MonitorFromWindow.restype = ctypes.c_void_p
+user32.MonitorFromWindow.argtypes = [ctypes.c_void_p, ctypes.wintypes.DWORD]
+
+
+def window_info(h):
+    """(left, top, right, bottom) of a window pets may stand on, else None: visible, titled, not minimized,
+    hidden by Windows (cloaked), a tool or click-through overlay, the desktop/taskbar, or ours."""
+    if not user32.IsWindowVisible(h) or user32.IsIconic(h) or not user32.GetWindowTextLengthW(h):
         return None
+    if user32.GetWindowLongW(h, -20) & 0xA0:  # WS_EX_TOOLWINDOW (our pets too) | WS_EX_TRANSPARENT
+        return None
+    dwm, cloaked = ctypes.windll.dwmapi, ctypes.c_int()
+    dwm.DwmGetWindowAttribute(h, 14, ctypes.byref(cloaked), 4)
     pid = ctypes.wintypes.DWORD()
     user32.GetWindowThreadProcessId(h, ctypes.byref(pid))
     cls = ctypes.create_unicode_buffer(64)
     user32.GetClassNameW(h, cls, 64)
-    if pid.value == os.getpid() or cls.value in SHELL_CLASSES:
+    if cloaked.value or pid.value == os.getpid() or cls.value in SHELL_CLASSES:
         return None
     r = ctypes.wintypes.RECT()
     # the visible frame (GetWindowRect includes Windows 10/11's invisible resize borders)
-    if ctypes.windll.dwmapi.DwmGetWindowAttribute(h, 9, ctypes.byref(r), ctypes.sizeof(r)):
+    if dwm.DwmGetWindowAttribute(h, 9, ctypes.byref(r), ctypes.sizeof(r)):
         user32.GetWindowRect(h, ctypes.byref(r))
-    return (h, r.left, r.top, r.right) if r.right - r.left >= 150 else None
+    return (r.left, r.top, r.right, r.bottom) if r.right > r.left and r.bottom > r.top else None
+
+
+def scan_windows():
+    """(rects, ledges, fullscreen). rects: {hwnd: (left, top, right, bottom)} of every window pets may stand on.
+    ledges: [(hwnd, left, top, right)], the parts of their top edges no window in front covers.
+    fullscreen: the window in front fills its whole monitor (a game, a video)."""
+    wins = []  # front to back
+
+    def each(h, _):
+        r = window_info(h)
+        if r:
+            wins.append((h, r, bool(user32.IsZoomed(h))))
+        return 1
+    user32.EnumWindows(ENUMPROC(each), None)
+    ledges = []
+    for i, (h, (l, t, r, b), zoomed) in enumerate(wins):
+        if zoomed:
+            continue  # a maximized window's top edge is the top of the screen
+        parts = [(l, r)]
+        for _, (l2, t2, r2, b2), _ in wins[:i]:  # windows in front that lie across this top edge
+            if t2 <= t < b2:
+                parts = [p for a, c in parts for p in ((a, min(c, l2)), (max(a, r2), c)) if p[1] > p[0]]
+        ledges += [(h, a, t, c) for a, c in parts if c - a >= 150]
+    full, front = False, user32.GetForegroundWindow()
+    info = front and window_info(front)
+    if info:
+        mi = MONITORINFOEX(cbSize=ctypes.sizeof(MONITORINFOEX))
+        user32.GetMonitorInfoW(user32.MonitorFromWindow(front, 2), ctypes.byref(mi))
+        m = mi.rcMonitor
+        full = info[0] <= m.left and info[1] <= m.top and info[2] >= m.right and info[3] >= m.bottom
+    return {h: r for h, r, _ in wins}, ledges, full
 
 
 class PetWidget(QWidget):
@@ -468,18 +579,35 @@ class PetWidget(QWidget):
     def paintEvent(self, e):
         pass  # the layered window shows Pet.draw()'s picture
 
+    # A press picks the pet up once the pointer moves 4 px or stays down 0.18 s; let go before that and it is
+    # a click (the pet reacts, and does not jump to hang from the pointer first).
     def mousePressEvent(self, e):
         if e.button() == Qt.LeftButton:
-            self.pet.grab()
+            self.pressed = cursor_pos()
+            QTimer.singleShot(180, self.pick_up)
         elif e.button() == Qt.RightButton:
             self.pet.menu()
 
+    def pick_up(self):
+        if getattr(self, 'pressed', None) and self.pet.alive:
+            self.pressed = None
+            self.pet.grab()
+
     def mouseMoveEvent(self, e):
-        if e.buttons() & Qt.LeftButton and self.pet.state in ('drag', 'hang'):
+        if not e.buttons() & Qt.LeftButton:
+            return
+        if getattr(self, 'pressed', None) and math.dist(self.pressed, cursor_pos()) > 4:
+            self.pick_up()
+        if self.pet.state in ('drag', 'hang'):
             self.pet.drag()
 
     def mouseReleaseEvent(self, e):
-        if e.button() == Qt.LeftButton and self.pet.state in ('drag', 'hang'):
+        if e.button() != Qt.LeftButton:
+            return
+        if getattr(self, 'pressed', None):
+            self.pressed = None
+            self.pet.poke()
+        elif self.pet.state in ('drag', 'hang'):
             self.pet.drop()
 
 
@@ -487,7 +615,15 @@ class Pet:
     def __init__(self, app, char=''):
         self.app, self.alive, self.char = app, True, char  # char: its character pack's name, '' = blob
         self.win = PetWidget(self)
-        self.shown = {}  # picture -> its prepared bytes
+        self.surf = Surface(self.win.hwnd)
+        self.last_key = self.last_pos = None  # what is on screen now, and where: nothing is redrawn needlessly
+        self.look = self.blend = None  # last plain picture drawn (picture, x, y); the one fading out (+ since when)
+        self.alpha, self.fade_to, self.dying = 0.0, 1.0, False  # fades in when it appears, out when it goes
+        self.anim = self.anim_prev = 0.0  # walk/run/climb pictures advance with distance covered, not time
+        self.turning = 0  # steps left standing while it turns round
+        self.goal = None  # screen x it was called to
+        self.cross = None  # the monitor it is walking over to (or coming from) while it straddles the edge
+        self.met = 0  # no greeting other pets before this frame
         self.resize()
         self.area = L, T, R, B = random.choice(app.allowed_areas())  # start on a monitor allowed in Settings
         self.x, self.y = random.randint(L, max(L, R - self.px)), T
@@ -496,7 +632,7 @@ class Pet:
         self.th = self.om = 0.0  # radians, radians/s: swing about the held hand or foot (0: hanging straight down)
         self.lean, self.pose = 0.0, None  # held by the hand: the shown picture's own body angle; (picture, when)
         self.sparks = []  # Yellow's staff fall: sparkles off the gem, [x, y, vx, vy, life]
-        self.ledge = None  # the window this pet stands on, as (hwnd, left, top, right)
+        self.ledge = None  # the window this pet stands on, as (hwnd, the window's left, the window's top)
         self.dir = random.choice((-1, 1))
         self.frame = 0       # physics steps (30 a second): drives sprite animation and timers
         self.t = 0.0         # seconds alive, continuous: drives the blob's smooth motion
@@ -508,10 +644,20 @@ class Pet:
 
     def set(self, state, timer=None, leap=False):
         """leap: a throw or a jump (the pack's leap poses in the air); any other fall is a plain drop."""
+        old = getattr(self, 'state', None)
         self.state, self.timer, self.leap = state, timer or random.randint(40, 200), leap
         if state == 'sit':  # sitting down at the laptop: a fresh terminal, from the first line
             self.__dict__.pop('term', None)
         self.since = getattr(self, 'frame', 0)  # pack animations start from their first picture
+        self.anim = self.anim_prev = 0.0
+        self.turning = 0
+        if old != state and old in SOFT and state in SOFT:
+            self.soften()
+
+    def soften(self):
+        """The picture on screen now fades into the next one over 80 ms (no snap between poses)."""
+        if self.look:
+            self.blend = self.look + (time.perf_counter(),)
 
     def land(self, hard=False, full=False, slow=1):
         """Touched down. Packs: a soft landing plays the second half of the landing animation (crouch, stand); a
@@ -539,7 +685,9 @@ class Pet:
         self.px = int(pet_px(self.app.settings) * (self.pack_scale if self.pack else 1))
         if self.char == 'Orange' and self.pack:  # load his get-up pictures now, not mid-landing (no hitch)
             self.getup_frames()
-        self.shown.clear()
+        if self.laptop():  # build his laptop poses on the side, not as he first sits down and types (no hitch)
+            threading.Thread(target=self.warm_desk, daemon=True).start()
+        self.last_key = self.look = self.blend = None
 
     # --- mouse (screen pixels from Windows, the same units as the pet's position) ---
     def body(self):
@@ -553,6 +701,8 @@ class Pet:
         """Picked up by the feet: hangs upside down by them. Anywhere else: reaches up and holds the pointer
         with its hand (the top of the 'held' picture). Either way that spot sits right on the pointer."""
         mx, my = cursor_pos()
+        self.app.wake()
+        self.goal = self.ledge = self.cross = None
         self.trail = [(time.perf_counter(), mx, my)]  # recent pointer positions, for the throw
         l, t, r, b = self.body()
         leg = self.state != 'ceiling' and my - self.y > t + 0.72 * (b - t)
@@ -770,12 +920,75 @@ class Pet:
     def update_area(self):
         """Live on the monitor under the pet; if Settings turned that monitor off, hop to an allowed one."""
         name, area = monitor_at(self.x + self.px // 2, self.y + self.px // 2)
+        self.cross = None
         if self.app.allowed(name):
             self.area = area
+            floor = area[3] - self.px  # the taskbar or the resolution changed under a standing pet
+            if self.state in FLOOR_STATES and not self.ledge and abs(self.y - floor) > 1:
+                if self.y > floor:
+                    self.y = floor
+                else:
+                    self.set('fall')
             return
         self.area = L, T, R, B = random.choice(self.app.allowed_areas())
         self.x, self.y = random.randint(L, max(L, R - self.px)), T
         self.set('fall')
+
+    def neighbour(self, side):
+        """The allowed monitor touching this one's left (-1) or right (1) edge at the pet's height, or None."""
+        L, T, R, B = self.area
+        mid = self.y + self.px / 2
+        for a in self.app.allowed_areas():
+            if a != self.area and abs(a[0] - R if side > 0 else a[2] - L) <= 2 and a[1] <= mid <= a[3]:
+                return a
+
+    def stride(self, base):
+        """Animation ticks per pixel covered, so the feet keep pace with the ground at any speed and size.
+        base: px per step at speed 1 (at 128 px a pack plays exactly as fast as it used to)."""
+        return self.pack[1] / (30 * base) * max(0.5, min(2, 128 / self.px)) if self.pack else 0
+
+    def call(self, gx):
+        """Called over: runs to screen x gx (for 15 s at most), from where it stands or once it lands."""
+        self.goal, self.goal_until = gx, self.frame + 450
+        if self.state in FLOOR_STATES:
+            self.head_for_goal()
+
+    def head_for_goal(self):
+        """Set off running towards the goal. False if it is already there."""
+        cx = self.x + self.px / 2
+        if abs(self.goal - cx) < self.px * 0.6:
+            self.goal = None
+            return False
+        self.set('run', 10 ** 6)
+        self.dir = 1 if self.goal > cx else -1
+        return True
+
+    def poke(self):
+        """Clicked, not dragged: a little hop on the spot. A climber lets go."""
+        self.app.wake()
+        if self.state in FLOOR_STATES:
+            self.vx, self.vy = 0, -(2 * self.g * self.px * 0.35) ** 0.5
+            self.set('fall', leap=True)
+        elif self.state in ('climb', 'ceiling'):
+            self.vx, self.vy = (-self.dir * 2 if self.state == 'climb' else 0), 0
+            self.set('fall')
+
+    def sit_here(self):
+        if self.state in FLOOR_STATES:
+            self.app.wake()
+            self.goal = None
+            self.set('sit', random.randint(900, 1500))
+
+    def busy(self):
+        """Needs the full frame rate now? A pet standing, sitting or lying still gets by on a few frames a second."""
+        return (self.state not in ('idle', 'sit', 'lie') or self.state == 'sit' and self.laptop()
+                or self.alpha != self.fade_to or self.blend is not None)
+
+    def close(self):
+        self.alive = False
+        self.win.close()
+        self.win.deleteLater()
+        self.surf.free()
 
     @property
     def g(self):
@@ -790,13 +1003,26 @@ class Pet:
         return bool(self.pack) and self.char == 'Yellow'
 
     def menu(self):
+        app = self.app
         m = QMenu()
-        m.setStyleSheet(self.app.menu_qss())
-        m.addAction('Settings...', self.app.open_settings)
-        m.addAction('Add pet', self.app.add)
-        m.addAction('Remove this pet', lambda: self.app.remove(self))
+        m.setStyleSheet(app.menu_qss())
+        m.addAction('Settings...', app.open_settings)
+        m.addAction('Add pet', app.add)
+        sub = m.addMenu('Change character')
+        for name in app.characters():
+            a = sub.addAction(name or 'Blob (default)', lambda n=name: app.swap(self, n))
+            a.setCheckable(True)
+            a.setChecked(name == self.char)
+        m.addAction('Sit here', self.sit_here)
+        m.addAction('Call pets here', app.call)
         m.addSeparator()
-        m.addAction('Quit', self.app.quit)
+        a = m.addAction('Pause pets', app.set_frozen)
+        a.setCheckable(True)
+        a.setChecked(app.frozen)
+        m.addAction('Hide pets', lambda: app.set_visible(False))
+        m.addAction('Remove this pet', lambda: app.remove(self))
+        m.addSeparator()
+        m.addAction('Quit', app.quit)
         m.exec(QCursor.pos())
 
     # --- behaviour ---
@@ -807,18 +1033,31 @@ class Pet:
         px, speed = self.px, self.app.settings['speed']
         floor, s = B - px, self.state
         self.timer -= 1
+        self.anim_prev = self.anim
         cx = self.x + px / 2
-        w = self.app.win  # active window: (hwnd, left, top, right) or None
-        if self.ledge:  # standing on a window: it is the floor, its width is the walkway; ride along if it moves
-            if not w or w[0] != self.ledge[0] or w[2] - px < T:
+        if self.cross:  # straddling two monitors: it lives on the one under its middle, and may stand on both
+            if not L <= cx <= R:
+                self.area, self.cross = self.cross, self.area
+                L, T, R, B = self.area
+                floor = B - px
+            if L <= self.x <= R - px:
+                self.cross = None
+            else:
+                L, R = min(L, self.cross[0]), max(R, self.cross[2])
+        if self.ledge:  # standing on a window: its top edge is the floor, the part no other window covers is
+            h, ox, oy = self.ledge  # the walkway; it rides along if the window moves
+            rect = self.app.rects.get(h)
+            if rect:
+                self.x += rect[0] - ox
+                self.y += rect[1] - oy
+            seg = rect and self.app.ledge_at(h, self.x + px / 2)
+            if not seg or seg[2] - px < T:
                 self.ledge = None
                 if s not in ('fall', 'drag'):
                     self.set('fall')
             else:
-                self.x += w[1] - self.ledge[1]
-                self.y += w[2] - self.ledge[2]
-                self.ledge = w
-                L, R, floor = w[1], w[3], w[2] - px
+                self.ledge = (h, rect[0], rect[1])
+                L, R, floor = seg[1], seg[3], seg[2] - px
         if s == 'fall':
             bottom = self.y + px
             # shortcut: Yellow's fall pictures ride a staff, by name: sparkles fly off it, and he always lands softly
@@ -835,14 +1074,21 @@ class Pet:
                     self.sparks.append([0.0, 0.0, random.uniform(0.2, 1.6), -random.uniform(1.0, 2.6), 16])
             self.x += self.vx
             self.y += self.vy
-            if not L <= self.x <= R - px:  # hit a screen edge: bounce off it, the knock flips the spin
-                self.x = max(L, min(R - px, self.x))
-                self.spin_v = max(-15, min(15, -self.spin_v * 0.6 + self.vx * 0.5))
-                self.vx = -self.vx * 0.5
+            if not L <= self.x <= R - px:
+                nb = None if self.ledge or self.cross else self.neighbour(1 if self.x > L else -1)
+                if nb:  # another monitor that side: flies on over to it
+                    self.cross = nb
+                else:  # hit a screen edge: bounce off it, the knock flips the spin
+                    self.x = max(L, min(R - px, self.x))
+                    self.spin_v = max(-15, min(15, -self.spin_v * 0.6 + self.vx * 0.5))
+                    self.vx = -self.vx * 0.5
             cx = self.x + px / 2
-            if (w and not self.ledge and self.vy > 0 and w[1] <= cx <= w[3] and bottom <= w[2] <= self.y + px
-                    and w[2] - px > T):  # dropping past a window's top edge: land on it
-                self.ledge, floor = w, w[2] - px
+            if self.vy > 0 and not self.ledge:  # dropping past a window's top edge: land on it (the highest)
+                hits = [g for g in self.app.ledges if g[1] <= cx <= g[3] and bottom <= g[2] <= self.y + px
+                        and T + px < g[2] <= B and g[0] in self.app.rects]
+                if hits:
+                    g = min(hits, key=lambda g: g[2])
+                    self.ledge, floor = (g[0],) + self.app.rects[g[0]][:2], g[2] - px
             if self.spin or self.spin_v:  # tumbling the way it was thrown: full turns, only air drag slows it
                 self.spin = (self.spin + self.spin_v + 180) % 360 - 180
                 self.spin_v *= 0.985
@@ -874,24 +1120,48 @@ class Pet:
                     self.y, self.vy = floor, 0
             if self.timer <= 0:
                 self.land(full=True)
+        elif s in ('walk', 'run') and self.turning:  # turning round: stands a moment, then sets off the other way
+            self.turning -= 1
+            if not self.turning:
+                self.dir, self.since = -self.dir, self.frame
+                self.soften()
         elif s in ('walk', 'run'):
-            self.x += (2 if s == 'walk' else 4) * speed * self.dir
-            if s == 'run' and random.random() < 0.004 and 'lie' not in self.app.settings['off']:  # tripped over its own feet
+            off, called = self.app.settings['off'], self.goal is not None
+            base = 2 if s == 'walk' else 4
+            # eases in over the first 0.2 s and out over the last (no instant start or stop)
+            dx = base * speed * min(1, (self.frame - self.since) / 6, (self.timer + 1) / 6)
+            self.x += dx * self.dir
+            self.anim += dx * self.stride(base)
+            if called and (abs(self.x + px / 2 - self.goal) < px * 0.6 or self.frame > self.goal_until):
+                self.goal = None  # got to where it was called
+                self.set('idle', 60)
+            elif s == 'run' and not called and random.random() < 0.004 and 'lie' not in off:  # tripped over its own feet
                 self.set('lie', 45)
             if not L <= self.x <= R - px:
+                side = 1 if self.x > L else -1
+                nb = None if self.ledge or self.cross else self.neighbour(side)
+                if nb and abs(nb[3] - B) <= 2 and (called or random.random() < 0.5):
+                    self.cross = nb  # a monitor with the same floor that side: walks on over
+                    return
                 self.x = max(L, min(R - px, self.x))
-                if self.ledge:  # end of the window: sit on the edge, or hop off
-                    if random.random() < 0.5:
+                if called:  # cannot get any nearer
+                    self.goal = None
+                    self.set('idle', 60)
+                elif self.ledge:  # end of the window: sit on the edge, or hop off
+                    if random.random() < 0.5 and 'sit' not in off:
                         self.set('sit')
                     else:
                         self.ledge, self.vx, self.vy = None, self.dir * 3, -6
                         self.set('fall')
-                elif random.random() < 0.5 and 'climb' not in self.app.settings['off']:
+                elif random.random() < 0.5 and 'climb' not in off:
                     self.set('climb')
                 else:
-                    self.dir = -self.dir
+                    self.turning = 3
+                    self.soften()
         elif s == 'climb':
-            self.y -= 2 * speed
+            dy = 2 * speed * min(1, (self.frame - self.since) / 6)
+            self.y -= dy
+            self.anim += dy * self.stride(2)
             if self.y <= T:  # reached the top: grab the top edge and swing along it, away from the wall
                 self.y, self.dir = T, -self.dir
                 self.set('ceiling')
@@ -900,27 +1170,36 @@ class Pet:
                 self.set('fall')
         elif s == 'ceiling':  # monkey bars across the top of the screen
             self.y = T
-            self.x += 2.5 * speed * self.dir
+            dx = 2.5 * speed * min(1, (self.frame - self.since) / 6)
+            self.x += dx * self.dir
+            self.anim += dx * self.stride(2.5)
             if not L <= self.x <= R - px:  # reached the far side: drop down
                 self.x = max(L, min(R - px, self.x))
                 self.set('fall')
             elif self.timer <= 0 and random.random() < 0.006:
                 self.set('fall')
-        if s in FLOOR_STATES and self.timer <= 0:
-            self.next_move(w, cx)
+        if s in FLOOR_STATES and self.state == s and self.timer <= 0:
+            self.next_move(cx)
 
-    def next_move(self, w, cx):
+    def next_move(self, cx):
         """Pick what to do next while standing around."""
+        if self.goal is not None and self.head_for_goal():
+            return
         L, T, R, B = self.area
         off = self.app.settings['off']
-        weights = MOOD_WEIGHTS.get(mood(self.app.settings), BASE_WEIGHTS)
+        # calm on battery (Settings > General), else by the day and night schedule
+        weights = MOOD_WEIGHTS.get('night' if self.app.saver else mood(self.app.settings), BASE_WEIGHTS)
         pick = lambda wt: [m for m, n in wt.items() if m != 'jump' for _ in range(n) if m not in off]
         choices = pick(weights) or pick(BASE_WEIGHTS)  # everything the mood likes is switched off: plain weights
-        if (w and not self.ledge and 'jump' not in off and w[2] < self.y and w[3] - w[1] > self.px * 2
-                and w[1] < R - self.px and w[3] > L + self.px):  # only windows on this pet's screen
+        # window edges above it to leap onto: wide enough, within reach, on this pet's screen
+        above = [] if self.ledge or 'jump' in off else [
+            g for g in self.app.ledges if 0 < self.y + self.px - g[2] < 700 and g[3] - g[1] > self.px * 2
+            and g[1] < R - self.px and g[3] > L + self.px and g[2] - self.px > T]
+        if above:
             choices += ['jump'] * weights['jump']
         move = random.choice(choices)
-        if move == 'jump':  # leap up onto the active window's top edge
+        if move == 'jump':  # leap up onto a window's top edge
+            w = random.choice(above)
             h = self.y + self.px - w[2]
             if 0 < h < 700:
                 self.vy = -((2 * self.g * (h + 30)) ** 0.5)
@@ -931,18 +1210,30 @@ class Pet:
                 return
             move = 'idle'
         # Yellow (by name) codes on his laptop for 30-50 s (until picked up)
+        was, way = self.state, self.dir
         self.set(move, random.randint(900, 1500) if move == 'sit' and self.laptop() else None)
-        if move in ('walk', 'run'):
-            self.dir = random.choice((-1, 1))
+        if move in ('walk', 'run') and random.random() < 0.5:
+            if was in ('walk', 'run'):  # already on the move: turns round through its standing picture
+                self.turning = 3
+                self.soften()
+            else:
+                self.dir = -way
 
-    def tick(self):
-        """About 60 frames a second. Movement is worked out in fixed 1/30 s steps (so speeds stay the same and
-        Tk's uneven timer can't speed it up or slow it down); in between, the drawn position glides from the last
-        step to the next one."""
+    def tick(self, cap=0.1):
+        """Once per screen refresh. Movement is worked out in fixed 1/30 s steps (so speeds stay the same at any
+        refresh rate); in between, the drawn position glides from the last step to the next one.
+        cap: the longest gap, in seconds, it catches up on."""
         if not self.alive:
             return
         now = time.perf_counter()
-        dt, self.last = min(0.1, now - self.last), now
+        dt, self.last = min(cap, now - self.last), now
+        if self.alpha != self.fade_to:  # fading in or out
+            k = dt * 1000 / self.app.fade_ms if self.app.fade_ms else 1
+            self.alpha = min(self.fade_to, self.alpha + k) if self.fade_to > self.alpha else max(self.fade_to, self.alpha - k)
+            if not self.alpha and not self.dying:
+                self.win.hide()
+        if self.dying or (self.app.frozen and self.state in PAUSABLE):
+            return self.draw()
         self.t += dt
         x, y = self.x, self.y
         if self.state in ('drag', 'hang'):
@@ -985,9 +1276,14 @@ class Pet:
             if s == 'getup':  # getting up from the floor: three pictures, a sixth of a second each
                 pics = self.getup_frames()[1 if d < 0 else 0]
                 return pics[min(len(pics) - 1, (f - self.since) // 5)]
+            if self.turning:  # turning round: its standing picture
+                return frames['idle'][1 if d < 0 else 0][0]
             pair = next((frames[k] for k in (s,) + STAND_INS.get(s, ()) if k in frames), frames['idle'])
             seq = pair[1] if d < 0 else pair[0]
-            i = int((f - self.since + self.acc / STEP) * fps / 30 /(getattr(self, 'land_slow', 1) if s == 'land' else 1))
+            if self.state in MOVING:  # by distance covered: the feet keep pace with the ground
+                i = int(self.anim_prev + (self.anim - self.anim_prev) * self.acc / STEP)
+            else:
+                i = int((f - self.since + self.acc / STEP) * fps / 30 /(getattr(self, 'land_slow', 1) if s == 'land' else 1))
             img = seq[min(i, len(seq) - 1) if s in ONCE else i % len(seq)]
             return img
         step = 0
@@ -1000,44 +1296,118 @@ class Pet:
         return self.app.blob_frame(s, 1 if d > 0 else -1, step, blink, st['style'], st['color'], self.px)
 
     def draw(self, x=None, y=None):
+        """Put this frame on screen, or do nothing if it is what is there already. One picture (its own, the laptop
+        scene or the staff ride), turned, breathing, faded and with its ground shadow, painted by Qt."""
         if not self.win.isVisible():
             return
+        x, y = self.x if x is None else x, self.y if y is None else y
+        px, s, st = self.px, self.state, self.app.settings
         img = self.picture()
-        if self.state == 'sit' and self.laptop():
-            return self.draw_desk(x, y)
-        if self.state == 'fall' and self.pack and not self.leap and self.char == 'Yellow':
-            return self.draw_staff(img, x, y)
-        top = self.state == 'ceiling'  # hanging: picture hugs the top edge, not the floor
-        hang = self.state == 'hang'
-        held = self.state in ('drag', 'hang')
-        # turn: swing about the held hand or foot, or tumble in the air about the middle
-        turn = (round(math.degrees(self.th - self.lean)) if held else
-                round(self.spin) % 360 if self.state == 'fall' else 0)
-        key = (id(img), top, hang, turn, (round(self.hx), round(self.hy)) if held else None)
-        shown = self.shown.get(key)
-        if shown is None:
-            from PIL import Image
-            px = self.px
-            cw = max(px, img.width)  # a picture wider than the square (Yellow's laptop) stays centred on it
-            canvas = Image.new('RGBA', (cw, px), (0, 0, 0, 0))
-            canvas.alpha_composite(img, ((cw - img.width) // 2, 0 if top else px - img.height))
-            if hang:
-                canvas = canvas.transpose(Image.Transpose.ROTATE_180)
-            dx, dy = -(cw - px) // 2, 0  # where the picture's corner sits, from the pet's position
-            if turn:  # room to turn all the way round the pivot, then trimmed to what's drawn
-                big = Image.new('RGBA', (3 * px, 3 * px), (0, 0, 0, 0))
-                big.paste(canvas, (px, px))
-                big = turned(big, turn, center=(self.hx + px, self.hy + px) if held else None)
-                l, t, r, b = big.getbbox() or (px, px, px + 1, px + 1)
-                canvas, dx, dy = big.crop((l, t, r, b)), l - px, t - px
-            # premultiplied, as Windows wants
-            shown = canvas.convert('RGBa').tobytes('raw', 'BGRa'), canvas.width, canvas.height, dx, dy
-            if len(self.shown) > 1500:
-                self.shown.clear()
-            self.shown[key] = shown
-        data, w, h, dx, dy = shown
-        show_layered(self.win.hwnd, data, w, h, round(self.x if x is None else x) + dx,
-                     round(self.y if y is None else y) + dy)
+        turn, pivot, flip, sparks, plain = 0.0, None, False, (), False
+        if s == 'sit' and self.laptop():
+            q, ox, oy = self.desk_layer()
+        elif s == 'fall' and self.pack and not self.leap and self.char == 'Yellow':
+            q, ox, oy, sparks = self.staff_layer(img)
+        else:
+            q, plain = self.app.qimg(img), True
+            # centred on the pet's square; hanging pictures hug the top edge, the rest stand on the floor
+            ox, oy = (px - img.width) // 2, 0 if s == 'ceiling' else px - img.height
+            if s in ('drag', 'hang'):  # swings about the held hand or foot (held by a foot: upside down)
+                turn, pivot, flip = math.degrees(self.th - self.lean), (round(self.hx, 1), round(self.hy, 1)), s == 'hang'
+            elif s == 'fall':  # tumbles in the air about its middle
+                turn, pivot = self.spin, (px / 2, px / 2)
+        turn = round(turn * 2) / 2 % 360
+        if s in GLIDE:  # quarter-pixel positions: slow movement glides instead of hopping pixel to pixel
+            x, y = round(x * 4) / 4, round(y * 4) / 4
+            x0, y0 = math.floor(x), math.floor(y)
+        else:
+            x0, y0 = x, y = round(x), round(y)
+        fx, fy = x - x0, y - y0
+        w, h = q.width(), q.height()
+        rise = 0  # breathing: a slow rise of a pixel or so while it rests, feet planted
+        if plain and not turn and st['breathe'] and s in ('idle', 'sit', 'lie'):
+            rise = round(0.012 * h * (0.5 - 0.5 * math.cos(self.t * math.pi / 2)) * 4) / 4
+        tr = QTransform()
+        if turn:
+            tr.translate(*pivot)
+            tr.rotate(-turn)
+            tr.translate(-pivot[0], -pivot[1])
+        if flip:
+            tr.translate(px / 2, px / 2)
+            tr.rotate(180)
+            tr.translate(-px / 2, -px / 2)
+        if rise:
+            tr.translate(0, oy + h)
+            tr.scale(1, 1 + rise / h)
+            tr.translate(0, -oy - h)
+        box = tr.mapRect(QRectF(ox, oy, w, h))
+        shade = None  # soft shadow on the ground under a standing pet: (middle x, width)
+        if st['shadow'] and not turn and (s in SOFT or s == 'crash'):
+            l, r = self.app.soles(img) if plain else self.desk_feet  # under what touches the ground
+            shade = (ox + (l + r) / 2, max(0.3 * px, 1.3 * (r - l)))
+            box = box.united(QRectF(shade[0] - shade[1] / 2, px - 0.06 * px, shade[1], 0.09 * px))
+        mix = None  # the last pose, fading out under this one
+        if self.blend:
+            bq, bx, by, since = self.blend
+            mix = round((time.perf_counter() - since) / 0.08 * 6) / 6
+            if mix >= 1 or turn or bq.cacheKey() == q.cacheKey():
+                self.blend = mix = None
+            else:
+                box = box.united(QRectF(bx, by, bq.width(), bq.height()))
+        if not turn and not flip:
+            self.look = (q, ox, oy)
+        bx0, by0 = math.floor(box.left()) - 1, math.floor(box.top()) - 1
+        cw, ch = math.ceil(box.right()) + 2 - bx0, math.ceil(box.bottom()) + 2 - by0
+        alpha = round(self.alpha * 255)
+        pos = (x0 + bx0, y0 + by0)
+        key = (q.cacheKey(), ox, oy, turn, pivot, flip, fx, fy, rise, shade, mix, sparks, alpha, cw, ch)
+        if key == self.last_key:
+            if pos != self.last_pos:
+                self.surf.move(*pos)
+                self.last_pos = pos
+            return
+        canvas = self.surf.fit(cw, ch)
+        if canvas is None:
+            return
+        p = QPainter(canvas)
+        p.setCompositionMode(QPainter.CompositionMode_Source)
+        p.fillRect(0, 0, cw, ch, Qt.transparent)
+        p.setCompositionMode(QPainter.CompositionMode_SourceOver)
+        p.setRenderHint(QPainter.SmoothPixmapTransform)
+        p.setRenderHint(QPainter.Antialiasing)
+        p.translate(fx - bx0, fy - by0)
+        if shade:
+            g = QRadialGradient(QPointF(0, 0), 0.5)
+            g.setColorAt(0, QColor(0, 0, 0, 70))
+            g.setColorAt(1, QColor(0, 0, 0, 0))
+            p.save()
+            p.translate(shade[0], px - 0.015 * px)
+            p.scale(shade[1], 0.09 * px)
+            p.setPen(Qt.NoPen)
+            p.setBrush(QBrush(g))
+            p.drawEllipse(QPointF(0, 0), 0.5, 0.5)
+            p.restore()
+        if mix is not None:  # old picture at 1 - mix, new one added at mix: an exact cross-fade
+            p.setOpacity(1 - mix)
+            p.drawImage(QPointF(bx, by), bq)
+            p.setOpacity(mix)
+            p.setCompositionMode(QPainter.CompositionMode_Plus)
+        p.save()
+        p.setTransform(tr, True)
+        p.drawImage(QPointF(ox, oy), q)
+        p.restore()
+        p.setOpacity(1)
+        p.setCompositionMode(QPainter.CompositionMode_SourceOver)
+        for sx, sy, r, a, wd in sparks:  # little four-point stars
+            pen = p.pen()
+            pen.setColor(QColor(255, 255, 255, a))
+            pen.setWidthF(wd)
+            p.setPen(pen)
+            p.drawLine(QPointF(sx - r, sy), QPointF(sx + r, sy))
+            p.drawLine(QPointF(sx, sy - r), QPointF(sx, sy + r))
+        p.end()
+        self.surf.show(cw, ch, pos[0], pos[1], alpha)
+        self.last_key, self.last_pos = key, pos
 
     # --- Yellow at his laptop (by name): facing you, cross-legged, coding in a little terminal by his head ---
     CODE = (('print("Hello World")', 'Hello World'), ('x = 5', None), ('y = x * 2', None), ('print(y)', '10'),
@@ -1216,6 +1586,16 @@ class Pet:
             cache[key] = src_img, base, part['head'], reach, lid, (col, lw), pivot, hc, k, R, caps
         return cache[key][1:]
 
+    def warm_desk(self):
+        """Thread: every pose he takes at the laptop (each hand up or down, head at each tilt), ready in the cache."""
+        try:
+            for look in range(4):
+                for dips in ((0, 0), (1.5, 0), (3.0, 0), (0, 1.5), (0, 3.0)):
+                    time.sleep(0.15)  # a pose at a time, so the frames on screen stay on time
+                    self.desk_frame(dips, look)
+        except Exception:
+            pass  # the pet changed size or character meanwhile: built on demand instead
+
     def desk_frame(self, dips, look):
         """One picture of him at the laptop (pet size): arms dipped by dips (degrees) as he taps, head tipped up
         by look (0-3) towards the code. Built at 4x and shrunk, cached per pose."""
@@ -1239,18 +1619,24 @@ class Pet:
             cache[key] = im.resize((im.width // R, im.height // R), Image.LANCZOS)
         return cache[key]
 
-    def draw_desk(self, x, y):
+    def desk_layer(self):
         """Yellow at his laptop: hands tap as he types, head eases up to glance at his code, which appears in a
-        little terminal by his head (a blinking underscore when he stops)."""
+        little terminal by his head (a blinking underscore when he stops). Returns (picture, x, y on the pet's
+        square); built again only when something in it changes."""
         from PIL import Image, ImageDraw, ImageFont
         t = self.__dict__.get('term') or {'lines': [], 'cur': '', 'tap': 0, 'glance': 0, 'idle': 0, 'look': 0}
         parts = self.desk_parts()
-        hc, k, R = parts[6], parts[7], parts[8]
-        hx, hy, k = hc[0] / R, hc[1] / R, k / R
-        dips = tuple(1.5 * t['tap'] if (len(t['cur']) + i) % 2 else 0 for i in range(2))  # one hand, then the other
-        pic = self.desk_frame(dips, t.get('look', 0))
         px = self.px
         pad, top = px * 2, px // 2  # room to the right for the code, and above for its lines
+        dips = tuple(1.5 * t['tap'] if (len(t['cur']) + i) % 2 else 0 for i in range(2))  # one hand, then the other
+        blink = t['idle'] < 12 or (self.frame // 15) % 2 == 0
+        key = (id(parts[0]), dips, t.get('look', 0), tuple(t['lines']), t['cur'], blink)
+        last = self.__dict__.get('desk_last')
+        if last and last[0] == key:
+            return last[1], -pad, -top
+        hc, k, R = parts[6], parts[7], parts[8]
+        hx, hy, k = hc[0] / R, hc[1] / R, k / R
+        pic = self.desk_frame(dips, t.get('look', 0))
         im = Image.new('RGBA', (px + 2 * pad, px + top), (0, 0, 0, 0))
         o = pad + (px - pic.width) // 2, top + px - pic.height
         im.alpha_composite(pic, o)
@@ -1265,20 +1651,22 @@ class Pet:
         d = ImageDraw.Draw(im)
         lh = round(13.2 * k)
         tx, ty = o[0] + hx + 15 * k, o[1] + hy - 24 * k
-        blink = t['idle'] < 12 or (self.frame // 15) % 2 == 0
+        edge = dict(stroke_width=max(1, round(k)), stroke_fill=(20, 20, 24, 255))  # readable on light windows too
         for n, line in enumerate(t['lines']):
             d.text((tx, ty - (len(t['lines']) - n) * lh), line, font=font,
-                   fill=(235, 235, 235, 255) if line.startswith('> ') else (150, 220, 150, 255))
+                   fill=(235, 235, 235, 255) if line.startswith('> ') else (150, 220, 150, 255), **edge)
         cur = '> ' + t['cur']
-        d.text((tx, ty), cur, font=font, fill=(235, 235, 235, 255))
+        d.text((tx, ty), cur, font=font, fill=(235, 235, 235, 255), **edge)
         if blink:
-            d.text((tx + d.textlength(cur, font=font), ty), '_', font=font, fill=(255, 255, 255, 255))
-        show_layered(self.win.hwnd, im.convert('RGBa').tobytes('raw', 'BGRa'), im.width, im.height,
-                     round(self.x if x is None else x) - pad, round(self.y if y is None else y) - top)
+            d.text((tx + d.textlength(cur, font=font), ty), '_', font=font, fill=(255, 255, 255, 255), **edge)
+        self.desk_last = key, qimage(im)
+        self.desk_feet = feet_of(im)
+        return self.desk_last[1], -pad, -top
 
-    def draw_staff(self, img, x, y):
-        """Yellow riding his staff down: his fall picture as drawn, with sparkles streaming off the gem."""
-        from PIL import Image, ImageDraw
+    def staff_layer(self, img):
+        """Yellow riding his staff down: his fall picture as drawn, with sparkles streaming off the gem.
+        Returns (picture, x, y on the pet's square, sparkles as (x, y, radius, opacity, line width))."""
+        from PIL import Image
         px = self.px
         pad = px // 2  # room for sparkles above and beside him
         cache = self.app.__dict__.setdefault('staffs', {})
@@ -1288,18 +1676,12 @@ class Pet:
             ox, oy = pad + (px - img.width) // 2, pad + px - img.height
             base = Image.new('RGBA', (px + 2 * pad,) * 2, (0, 0, 0, 0))
             base.alpha_composite(without_sparkles(img, gem), (ox, oy))  # only the moving sparkles
-            cache[key] = img, base, (gem[0] + ox, gem[1] + oy), (1 if gem[0] > tip[0] else -1)
+            cache[key] = img, qimage(base), (gem[0] + ox - pad, gem[1] + oy - pad), (1 if gem[0] > tip[0] else -1)
         _, base, (gx, gy), side = cache[key]
-        im = base.copy()
-        d = ImageDraw.Draw(im)
         k = px / 128
-        for sx, sy, _, _, life in self.sparks:  # little four-point stars, shrinking and fading
-            cx, cy, r = gx + side * sx * k, gy + sy * k, (1 + life / 6) * k
-            col = (255, 255, 255, int(255 * min(1, life / 10)))
-            d.line((cx - r, cy, cx + r, cy), fill=col, width=max(1, round(k)))
-            d.line((cx, cy - r, cx, cy + r), fill=col, width=max(1, round(k)))
-        show_layered(self.win.hwnd, im.convert('RGBa').tobytes('raw', 'BGRa'), im.width, im.height,
-                     round(self.x if x is None else x) - pad, round(self.y if y is None else y) - pad)
+        sparks = tuple((gx + side * sx * k, gy + sy * k, (1 + life / 6) * k, int(255 * min(1, life / 10)),
+                        max(1.0, float(round(k)))) for sx, sy, _, _, life in self.sparks)  # shrinking and fading
+        return base, -pad, -pad, sparks
 
 
 def staff_ends(img):
@@ -1335,14 +1717,46 @@ def turned(img, deg, center=None):
     return img.convert('RGBa').rotate(deg, Image.BICUBIC, center=center).convert('RGBA')
 
 
+def tween(a, b):
+    """The picture half way between a and b, drawn as one figure: each picture is pushed half way along the
+    motion between them (optical flow on their soft shapes), the two are averaged, and what only one of them
+    put there fades out. None without numpy and OpenCV, or when too much of the figure got lost on the way."""
+    try:
+        import cv2, numpy as np
+    except ImportError:
+        return None
+    from PIL import Image
+    pa, pb = (np.asarray(i.convert('RGBa'), dtype=np.float32) for i in (a, b))
+    k = max(a.size) / 224  # the numbers below suit a 224 px picture
+    ga, gb = (cv2.GaussianBlur(p[..., 3], (0, 0), max(1.5, 6 * k)).astype(np.uint8) for p in (pa, pb))
+    win = max(9, int(31 * k) | 1)
+    there = cv2.calcOpticalFlowFarneback(ga, gb, None, 0.5, 5, win, 5, 7, 1.5, 0)
+    back = cv2.calcOpticalFlowFarneback(gb, ga, None, 0.5, 5, win, 5, 7, 1.5, 0)
+    h, w = ga.shape
+    gx, gy = np.meshgrid(np.arange(w, dtype=np.float32), np.arange(h, dtype=np.float32))
+    mid = (cv2.remap(pa, gx + back[..., 0] / 2, gy + back[..., 1] / 2, cv2.INTER_LINEAR)
+           + cv2.remap(pb, gx + there[..., 0] / 2, gy + there[..., 1] / 2, cv2.INTER_LINEAR)) / 2
+    al = mid[..., 3:4] / 255
+    keep = np.clip((al - 0.4) / 0.25, 0, 1)  # solid where both agree; a lone half-strength ghost all but goes
+    mid = np.where(al > 0, mid / np.maximum(al, 1e-3) * keep, 0)
+    solid = lambda p: float((p[..., 3] > 128).sum())
+    if solid(mid) < 0.8 * (solid(pa) + solid(pb)) / 2:
+        return None
+    return Image.fromarray(np.clip(mid, 0, 255).astype(np.uint8), 'RGBa').convert('RGBA')
+
+
 def smoothed(pack):
-    """The pack with a blended picture between each pair of frames, and twice the fps, so it plays at the same
+    """The pack with an in-between picture after each frame, and twice the fps, so it plays at the same
     speed but twice as finely. Long slow loops (idle) and one-shots' ends are left alone."""
     from PIL import Image
     frames, fps = pack
     from PIL import ImageChops, ImageStat
     def mix(a, b):
-        """Half way between two pictures, or just a again when they differ too much (a blend would show a ghost)."""
+        """Half way between two pictures: a real in-between if it can be made, else a plain blend, or just a again
+        when they differ too much (a blend would show a ghost)."""
+        made = tween(a, b) if real else None
+        if made is not None:
+            return made
         ma, mb = (i.getchannel('A').point(lambda v: 255 if v > 128 else 0) for i in (a, b))
         union = ImageStat.Stat(ImageChops.lighter(ma, mb)).sum[0] or 1
         if ImageStat.Stat(ImageChops.darker(ma, mb)).sum[0] / union < 0.55:  # overlap of the two silhouettes
@@ -1350,14 +1764,16 @@ def smoothed(pack):
         return Image.blend(a.convert('RGBa'), b.convert('RGBa'), 0.5).convert('RGBA')
     out = {}
     for state, pair in frames.items():
-        seqs = []
-        for seq in pair:
-            if not 2 <= len(seq) <= 60 or any(i.size != seq[0].size for i in seq):
-                seqs.append([x for i in seq for x in (i, i)])  # same picture twice: timing stays in step
-                continue
+        plain = 0 if isinstance(pair[0], list) else 1  # the pictures as drawn; the other side mirrors them
+        real = state not in ONCE  # landings and falls change pose too much for a true in-between
+        seq = pair[plain]
+        if not 2 <= len(seq) <= 60 or any(i.size != seq[0].size for i in seq):
+            new = [x for i in seq for x in (i, i)]  # same picture twice: timing stays in step
+        else:
             nxt = seq[1:] + ([] if state in ONCE else seq[:1])
-            seqs.append([x for i, n in zip(seq, nxt + seq[-1:]) for x in (i, mix(i, n) if n is not i else i)])
-        out[state] = tuple(seqs)
+            new = [x for i, n in zip(seq, nxt + seq[-1:]) for x in (i, mix(i, n) if n is not i else i)]
+        both = (new, packs.Mirrored(new))
+        out[state] = both if plain == 0 else both[::-1]
     return out, fps * 2
 
 
@@ -1527,7 +1943,65 @@ def to_pixmap(img):
     return QPixmap.fromImage(QImage(data, img.width, img.height, img.width * 4, QImage.Format_RGBA8888).copy())
 
 
+class Ticker(QObject):
+    """Carries news from the waiting threads over to the main thread."""
+    tick = Signal()
+    again = Signal()  # the app was launched a second time
+
+
+WINEVENTPROC = ctypes.WINFUNCTYPE(None, ctypes.c_void_p, ctypes.wintypes.DWORD, ctypes.c_void_p, ctypes.c_long,
+                                  ctypes.c_long, ctypes.wintypes.DWORD, ctypes.wintypes.DWORD)
+user32.SetWinEventHook.restype = user32.RegisterPowerSettingNotification.restype = ctypes.c_void_p
+user32.SetWinEventHook.argtypes = [ctypes.wintypes.DWORD, ctypes.wintypes.DWORD, ctypes.c_void_p, WINEVENTPROC,
+                                   ctypes.wintypes.DWORD, ctypes.wintypes.DWORD, ctypes.wintypes.DWORD]
+user32.RegisterPowerSettingNotification.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.wintypes.DWORD]
+user32.RegisterHotKey.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_uint, ctypes.c_uint]
+user32.UnregisterHotKey.argtypes = [ctypes.c_void_p, ctypes.c_int]
+ctypes.windll.wtsapi32.WTSRegisterSessionNotification.argtypes = [ctypes.c_void_p, ctypes.wintypes.DWORD]
+# GUID_CONSOLE_DISPLAY_STATE {6fe69556-704a-47a0-8f24-c28d936fda47}: Windows reports the display going off and on
+DISPLAY_STATE = (ctypes.c_ubyte * 16)(*bytes.fromhex('5695e66f4a70a0478f24c28d936fda47'))
+
+
+class POWERSETTING(ctypes.Structure):  # POWERBROADCAST_SETTING
+    _fields_ = [('guid', ctypes.c_ubyte * 16), ('size', ctypes.wintypes.DWORD), ('data', ctypes.c_ubyte)]
+
+
+class POWERSTATUS(ctypes.Structure):  # SYSTEM_POWER_STATUS
+    _fields_ = [('ac', ctypes.c_ubyte), ('flag', ctypes.c_ubyte), ('percent', ctypes.c_ubyte),
+                ('saver', ctypes.c_ubyte), ('left', ctypes.wintypes.DWORD), ('full', ctypes.wintypes.DWORD)]
+
+
+def on_battery():
+    s = POWERSTATUS()
+    return bool(k32.GetSystemPowerStatus(ctypes.byref(s))) and s.ac == 0
+
+
+class Events(QAbstractNativeEventFilter):
+    """Windows messages the app acts on: the hotkey, lock and unlock, the display going off, the power source."""
+
+    def __init__(self, app):
+        super().__init__()
+        self.app = app
+
+    def nativeEventFilter(self, kind, message):
+        msg = ctypes.wintypes.MSG.from_address(int(message))
+        m, w = msg.message, msg.wParam
+        if m == 0x0312:  # WM_HOTKEY
+            self.app.set_visible(not self.app.visible)
+        elif m == 0x02B1 and w in (7, 8):  # WM_WTSSESSION_CHANGE: lock, unlock
+            self.app.hold('lock', w == 7)
+        elif m == 0x0218 and w == 0x8013 and msg.lParam:  # WM_POWERBROADCAST, a power setting changed
+            s = POWERSETTING.from_address(msg.lParam)
+            if bytes(s.guid) == bytes(DISPLAY_STATE):
+                self.app.hold('display', s.data == 0)
+        elif m == 0x0218 and w == 0x000A:  # plugged in or unplugged
+            self.app.check_power()
+        return False, 0
+
+
 class App:
+    fade_ms = 150  # pets fade in and out this long
+
     def __init__(self, tray=True, startup=False, window=True):
         """startup: launched at Windows login, so bring back the saved pets quietly.
         Otherwise (Start menu / taskbar) open Settings and wait for the user to send a pet out from Home."""
@@ -1538,18 +2012,37 @@ class App:
         self.settings = load_settings()
         self.blob_cache = {}
         self.pack_cache = {}
+        self.qimgs = {}  # id(picture) -> (picture, its QImage, its solid box)
         self.migrate_character()
         self.load_character()
         self.pets = []
+        self.ghosts = []  # removed pets, still fading out
         self.panel = None
-        self.visible = True
+        self.visible = True  # "Show pets"
+        self.holds = set()  # why pets are hidden for now: 'fullscreen', 'lock', 'display', 'snooze'
+        self.frozen = False  # "Pause pets"
+        self.saver = False  # on battery: half the frame rate, calm behaviour
         self.minutes = 0
-        self.win = None  # active window pets can stand on; refreshed by watch_window()
+        self.rects, self.ledges = {}, []  # windows pets can stand on, and the free parts of their top edges
+        self.dirty, self.moving, self.scanned = True, False, 0.0  # windows changed; one is being dragged; last look
+        self.n = self.quiet = 0  # frames so far; frames in a row with nothing moving
         self.tray = self.start_tray() if tray else None
         self.show_event = k32.CreateEventW(None, False, False, SHOW_EVENT)
         if tray and autostart():
             autostart(True)  # refresh an older login entry so it carries --startup
-        if startup:
+        # frames: a thread waits for each screen refresh and asks for one frame (awake); when nothing moves it
+        # stops and a slow timer takes over; hidden or without pets, both stop
+        self.ticker, self.pending = Ticker(), False
+        self.ticker.tick.connect(self.frame)
+        self.awake = threading.Event()
+        self.slow = QTimer()
+        self.slow.timeout.connect(self.frame)
+        self.snooze = QTimer(singleShot=True)
+        self.snooze.timeout.connect(lambda: self.hold('snooze', False))
+        threading.Thread(target=self.vsync, daemon=True).start()
+        self.listen()
+        self.check_power()
+        if startup or self.settings['restore']:
             for ch, n in list(self.settings['roster'].items()):
                 for _ in range(n):
                     self.add(ch, save=False)
@@ -1558,38 +2051,205 @@ class App:
             self.settings['roster'] = {}
         if FROZEN:
             threading.Thread(target=download_update, daemon=True).start()
-        self.timers = [self.every(15, self.frame, precise=True), self.every(60_000, self.every_minute),
-                       self.every(100, self.watch_window), self.every(200, self.poll)]
+        self.minute = QTimer()
+        self.minute.timeout.connect(self.every_minute)
+        self.minute.start(60_000)
         if window and not startup:
             QTimer.singleShot(50, self.open_settings)
-        self.watch_window()
-
-    def every(self, ms, fn, precise=False):
-        t = QTimer()
-        if precise:
-            t.setTimerType(Qt.PreciseTimer)
-        t.timeout.connect(fn)
-        t.start(ms)
-        return t
 
     def run(self):
         self.qt.exec()
 
+    # --- frames ---
+    def vsync(self):
+        """Thread: one frame request per screen refresh (60, 120, 144 Hz...), so pets move in step with the
+        screen. A frame still being drawn is not asked for twice."""
+        flush = ctypes.windll.dwmapi.DwmFlush
+        while self.awake.wait():
+            t = time.perf_counter()
+            if flush() or time.perf_counter() - t < 0.002:
+                time.sleep(0.015)  # no refresh to wait for (screen off, remote session): plain 60-odd a second
+            if not self.pending:
+                self.pending = True
+                try:
+                    self.ticker.tick.emit()
+                except RuntimeError:
+                    return  # the app is gone
+
+    def wake(self):
+        """Back to full frame rate (something moves, appears or was clicked)."""
+        if self.pets or self.ghosts:
+            self.slow.stop()
+            self.awake.set()
+
     def frame(self):
-        for p in list(self.pets):
-            p.tick()
+        self.pending = False
+        self.n += 1
+        fast = self.awake.is_set()
+        if fast and self.saver and self.n % 2:
+            return  # on battery: every other refresh
+        now = time.perf_counter()
+        if self.dirty or self.moving or now - self.scanned > 1:
+            self.scan()
+        for p in self.pets + self.ghosts:
+            p.tick(0.1 if fast else 0.35)
+        for g in [g for g in self.ghosts if not g.alpha]:
+            self.ghosts.remove(g)
+            g.close()
+        if self.n % 15 == 0:
+            self.mingle()
+        shown = self.ghosts or any(p.alpha or p.fade_to for p in self.pets)
+        if self.moving or self.ghosts or any(p.busy() for p in self.pets):
+            self.quiet = 0
+            if not fast:
+                self.wake()
+        elif not shown:  # no pets, or all hidden: no frames at all until something changes
+            self.awake.clear()
+            self.slow.stop()
+        else:
+            self.quiet += 1
+            if fast and self.quiet > 30:  # nothing has moved for a while: a few frames a second will do
+                self.awake.clear()
+                self.slow.start(200)
 
-    def watch_window(self):
-        self.win = active_window()
+    def scan(self):
+        """Look at the windows on screen: where pets can stand, and whether a fullscreen app is in front."""
+        self.rects, self.ledges, full = scan_windows()
+        self.dirty, self.scanned = False, time.perf_counter()
+        self.hold('fullscreen', full and self.settings['fullscreen'])
 
-    def poll(self):
-        if self.show_event and k32.WaitForSingleObject(ctypes.c_void_p(self.show_event), 0) == 0:
-            self.open_settings()  # the app was launched again
+    def ledge_at(self, hwnd, cx):
+        """The free part of a window's top edge under screen x cx, as (hwnd, left, top, right), or None."""
+        return next((g for g in self.ledges if g[0] == hwnd and g[1] - 1 <= cx <= g[3] + 1), None)
+
+    def mingle(self):
+        """Two pets that meet on the same ground stop and face each other; now and then they sit down together."""
+        free = [p for p in self.pets if p.state in ('walk', 'run', 'idle') and p.goal is None]
+        for i, a in enumerate(free):
+            for b in free[i + 1:]:
+                if (a.frame >= a.met and b.frame >= b.met and abs(a.y + a.px - b.y - b.px) < 4
+                        and abs(a.x + a.px / 2 - b.x - b.px / 2) < (a.px + b.px) * 0.55):
+                    sit = random.random() < 0.3 and 'sit' not in self.settings['off']
+                    for p, o in ((a, b), (b, a)):
+                        p.met = p.frame + 900  # not again for 30 s
+                        p.set('sit' if sit else 'idle', random.randint(60, 120))
+                        p.dir = 1 if o.x > p.x else -1
+
+    # --- things Windows tells us (no polling) ---
+    def listen(self):
+        """Hook up: a second launch, windows moving or coming to the front, lock and unlock, the display going
+        off, the power source, the hide/show hotkey, and any change to the screens."""
+        self.ticker.again.connect(lambda: self.open_settings())  # the app was launched again
+        if self.show_event:
+            threading.Thread(target=self.wait_for_launch, daemon=True).start()
+        self.hook_proc = WINEVENTPROC(self.window_event)  # kept: Windows calls it for as long as we run
+        self.hook = user32.SetWinEventHook(3, 0x17, None, self.hook_proc, 0, 0, 0)  # foreground .. minimize end
+        self.sink = QWidget()  # an unseen window to receive the messages below
+        self.sink_hwnd = int(self.sink.winId())
+        self.events = Events(self)
+        self.qt.installNativeEventFilter(self.events)
+        ctypes.windll.wtsapi32.WTSRegisterSessionNotification(ctypes.c_void_p(self.sink_hwnd), 0)
+        user32.RegisterPowerSettingNotification(ctypes.c_void_p(self.sink_hwnd), DISPLAY_STATE, 0)
+        self.set_hotkey()
+        self.qt.screenAdded.connect(self.watch_screen)
+        self.qt.screenRemoved.connect(lambda *_: self.screens_changed())
+        for s in self.qt.screens():
+            self.watch_screen(s)
+
+    def wait_for_launch(self):
+        """Thread: sleeps until a second launch sets the event, then asks the main thread to open Settings."""
+        while k32.WaitForSingleObject(ctypes.c_void_p(self.show_event), -1) == 0:
+            try:
+                self.ticker.again.emit()
+            except RuntimeError:
+                return  # the app is gone
+
+    def window_event(self, hook, event, hwnd, obj, child, thread, when):
+        if event in (0x0A, 0x0B):  # a window is being dragged or resized: follow it every frame until it stops
+            self.moving = event == 0x0A
+        elif event not in (3, 0x16, 0x17):  # foreground change, minimize start and end
+            return
+        if self.holds:
+            self.scan()  # no frames run while pets are hidden: look now (the fullscreen app may be gone)
+        else:
+            self.dirty = True
+            self.wake()
+
+    def watch_screen(self, screen):
+        screen.geometryChanged.connect(lambda *_: self.screens_changed())
+        screen.availableGeometryChanged.connect(lambda *_: self.screens_changed())
+        self.screens_changed()
+
+    def screens_changed(self):
+        """Resolution, taskbar or monitor layout changed: pets take up their new ground at once."""
+        for p in self.pets:
+            if p.state not in ('drag', 'hang'):
+                p.update_area()
+        self.dirty = True
+        self.wake()
+
+    def set_hotkey(self):
+        """Ctrl+Alt+P hides and shows the pets from anywhere (Settings > General). Taken by another app: no hotkey."""
+        user32.UnregisterHotKey(ctypes.c_void_p(self.sink_hwnd), 1)
+        if self.settings['hotkey'] and self.tray:
+            user32.RegisterHotKey(ctypes.c_void_p(self.sink_hwnd), 1, 0x4003, 0x50)  # NOREPEAT | CTRL | ALT, P
+
+    def check_power(self):
+        self.saver = self.settings['battery'] and on_battery()
+
+    def hold(self, why, on):
+        """Hide the pets for a reason, or lift that reason. They show when Show pets is on and no reason is left."""
+        before = bool(self.holds)
+        (self.holds.add if on else self.holds.discard)(why)
+        if bool(self.holds) != before:
+            self.refresh()
+
+    def refresh(self):
+        """Fade every pet in or out to match Show pets and the holds."""
+        on = self.visible and not self.holds
+        for p in self.pets:
+            p.fade_to = 1.0 if on else 0.0
+            if on:
+                p.last = time.perf_counter()  # no catching up on the time it was hidden
+                p.win.show()
+            elif not self.fade_ms:
+                p.alpha = 0.0
+                p.win.hide()
+        self.wake()
+
+    def set_frozen(self, on=None):
+        """Pause pets: they stay where they are (one in the air still comes down)."""
+        self.frozen = not self.frozen if on is None else on
+        if self.tray:
+            self.pause_action.setChecked(self.frozen)
+        self.wake()
+
+    def call(self):
+        """Every pet runs to the pointer."""
+        for p in self.pets:
+            p.call(cursor_pos()[0])
+        self.wake()
+
+    def characters(self):
+        """Names to offer in menus: '' (the blob), then each installed pack."""
+        return [''] + [name for name, _ in packs.list_packs(PACKS_DIR)]
+
+    def swap(self, pet, char):
+        """Right-click > Change character: this one pet becomes another character."""
+        r = self.settings['roster']
+        r[pet.char] = r.get(pet.char, 1) - 1
+        r[char] = r.get(char, 0) + 1
+        self.settings['roster'] = {k: v for k, v in r.items() if v > 0}
+        pet.char = char
+        pet.resize()
+        pet.set('idle')
+        save_settings(self.settings)
+        self.wake()
 
     def every_minute(self):
-        for p in self.pets:  # resolution, taskbar or monitor layout may have changed
-            if p.state != 'drag':
-                p.update_area()
+        self.check_power()
+        if self.holds:
+            self.scan()  # in case the event that ends a hold was missed
         self.minutes += 1
         if FROZEN:  # only the installed exe self-updates, not `python pet.py`
             if apply_update():
@@ -1625,14 +2285,17 @@ class App:
         """((frames, fps) or None for the blob, the pack's scale) for one character at the current size."""
         path = os.path.join(PACKS_DIR, name)
         scale = packs.scale_of(packs.read_meta(path)) if name and os.path.isdir(path) else 1
-        key = (name, pet_px(self.settings), scale, self.settings['smooth'])
+        # animations of things switched off in Home > Behaviour are not loaded at all (dance alone is ~100 pictures)
+        skip = tuple(s for s in ('dance', 'run', 'lie', 'sit', 'climb') if s in self.settings['off'])
+        key = (name, pet_px(self.settings), scale, self.settings['smooth'], skip)
         if key not in self.pack_cache:  # sliders call apply() many times a second: never reload images needlessly
             if len(self.pack_cache) > 12:  # the Size slider makes a key per step
                 self.pack_cache.clear()
+                self.qimgs.clear()
             pack = None
             if name and os.path.isdir(path):
                 try:
-                    pack = packs.load_frames(path, int(pet_px(self.settings) * scale))
+                    pack = packs.load_frames(path, int(pet_px(self.settings) * scale), skip)
                 except Exception:
                     pack = None  # broken pack: fall back to the blob rather than crash the pets
                 if pack and 'idle' not in pack[0]:
@@ -1641,6 +2304,20 @@ class App:
                     pack = smoothed(pack)
             self.pack_cache[key] = pack
         return self.pack_cache[key], scale
+
+    def qimg(self, img):
+        """A picture ready for drawing (converted once, then reused)."""
+        hit = self.qimgs.get(id(img))
+        if hit is None or hit[0] is not img:  # keyed by the picture itself (ids get reused)
+            if len(self.qimgs) > 1500:
+                self.qimgs.clear()
+            hit = self.qimgs[id(img)] = img, qimage(img), feet_of(img)
+        return hit[1]
+
+    def soles(self, img):
+        """(left, right) of the part of a picture that touches the ground."""
+        self.qimg(img)
+        return self.qimgs[id(img)][2]
 
     def load_character(self):
         """The main character (Home preview, accent, Add pet): its pack in self.pack; None means the blob."""
@@ -1686,11 +2363,18 @@ class App:
         return img
 
     def set_visible(self, on):
+        """Show pets on or off. On also ends a snooze and any hold a missed unlock or wake-up left behind."""
         self.visible = on
-        for p in self.pets:
-            p.win.setVisible(on)
+        if on:
+            self.snooze.stop()
+            self.holds -= {'snooze', 'lock', 'display'}
+        self.refresh()
         if self.tray:
             self.show_action.setChecked(on)
+
+    def hide_for_an_hour(self):
+        self.hold('snooze', True)
+        self.snooze.start(3_600_000)
 
     def open_settings(self, tab='home'):
         if self.panel:
@@ -1706,9 +2390,18 @@ class App:
         menu = self.tray_menu = QMenu()
         menu.setStyleSheet(self.menu_qss())
         menu.addAction('Settings', self.open_settings)
+        adder = menu.addMenu('Add pet')
+        adder.aboutToShow.connect(lambda: (adder.clear(), [adder.addAction(
+            n or 'Blob (default)', lambda n=n: (self.add(n), self.set_visible(True))) for n in self.characters()]))
+        menu.addAction('Call pets', self.call)
+        menu.addSeparator()
+        self.pause_action = QAction('Pause pets', menu, checkable=True)
+        self.pause_action.toggled.connect(lambda on: on != self.frozen and self.set_frozen(on))
+        menu.addAction(self.pause_action)
         self.show_action = QAction('Show pets', menu, checkable=True, checked=True)
         self.show_action.toggled.connect(lambda on: on != self.visible and self.set_visible(on))
         menu.addAction(self.show_action)
+        menu.addAction('Hide for 1 hour', self.hide_for_an_hour)
         menu.addSeparator()
         menu.addAction('Quit', self.quit)
         tray.setContextMenu(menu)
@@ -1719,16 +2412,29 @@ class App:
     def quit(self):
         if self.tray:
             self.tray.hide()
-        for p in self.pets:
-            p.alive = False
-            p.win.close()
+        self.awake.clear()
+        self.slow.stop()
+        if self.hook:
+            user32.UnhookWinEvent(ctypes.c_void_p(self.hook))
+            self.hook = None
+        user32.UnregisterHotKey(ctypes.c_void_p(self.sink_hwnd), 1)
+        self.qt.removeNativeEventFilter(self.events)
+        for p in self.pets + self.ghosts:
+            p.close()
         self.qt.quit()
 
     def add(self, char=None, save=True):
         if len(self.pets) >= 10:
             return
         char = self.settings['character'] if char is None else char
-        self.pets.append(Pet(self, char))
+        pet = Pet(self, char)
+        if not self.fade_ms:
+            pet.alpha = 1.0
+        if self.holds:  # hidden for now (fullscreen app, snooze): it appears with the others
+            pet.alpha = pet.fade_to = 0.0
+            pet.win.hide()
+        self.pets.append(pet)
+        self.wake()
         if save:
             r = self.settings['roster']
             r[char] = r.get(char, 0) + 1
@@ -1736,10 +2442,13 @@ class App:
             save_settings(self.settings)
 
     def remove(self, pet, count=True):
-        pet.alive = False
-        pet.win.close()
-        pet.win.deleteLater()
         self.pets.remove(pet)
+        if self.fade_ms and pet.alpha and pet.win.isVisible():  # fades out, then goes
+            pet.dying, pet.fade_to = True, 0.0
+            self.ghosts.append(pet)
+            self.wake()
+        else:
+            pet.close()
         if count:  # apply() fixes the roster itself
             r = self.settings['roster']
             r[pet.char] = r.get(pet.char, 0) - 1
@@ -1823,6 +2532,9 @@ def check_packs(d):
             pass
     loaded, fps = packs.load_frames(os.path.join(dest, 'Test pet'), 64)
     assert fps == 12 and len(loaded['idle'][0]) == 2 and max(loaded['idle'][0][0].size) == 64
+    left = loaded['idle'][1]  # mirrored on first use, then the same picture again
+    assert left[0] is left[0] and left[-1].size == loaded['idle'][0][-1].size and len(left[:1]) == 1
+    assert list(packs.load_frames(os.path.join(dest, 'Test pet'), 64, skip=('walk',))[0]) == ['idle']
     # a Shimeji-ee download: img/<name>/conf/actions.xml naming its pictures (facing left, 128 px)
     shim = os.path.join(d, 'shimeji.zip')
     pose = lambda img, t: f'<Pose Image="/{img}" ImageAnchor="64,128" Velocity="0,0" Duration="{t}" />'
@@ -1856,8 +2568,10 @@ def check_packs(d):
 
 
 def selftest():
-    global SETTINGS_FILE, PACKS_DIR, CHARACTER_FILE, active_window
-    active_window = lambda: None  # the user's real windows must not take part in the test
+    global SETTINGS_FILE, PACKS_DIR, CHARACTER_FILE, scan_windows
+    assert len(scan_windows()) == 3  # the real desktop scans without error
+    scan_windows = lambda: ({}, [], False)  # the user's real windows must not take part in the test
+    App.fade_ms = 0  # no fades: pets show, hide and go at once
     assert newer('1.0.10', '1.0.9') and not newer('1.0.0', '1.0.0') and not newer('0.9', '1.0')
     check_updater()
     assert os.path.exists(LOGO), f'missing {LOGO}'
@@ -1876,42 +2590,48 @@ def selftest():
             p.step()
             assert L <= p.x <= R - p.px, p.x
         assert p.y <= B - p.px
-        p.x, p.state, p.dir = R - p.px, 'walk', 1  # walk into right wall
+        p.x, p.state, p.dir, p.timer, p.since = R - p.px, 'walk', 1, 100, p.frame - 6  # walk into right wall
         p.step()
-        assert p.state == 'climb' or p.dir == -1
+        assert p.state == 'climb' or p.turning == 3
+        if p.turning:  # turns round through its standing picture, then walks back
+            for _ in range(3):
+                p.step()
+            assert p.dir == -1 and not p.turning
         p.x, p.y, p.state, p.dir = R - p.px, T + 6, 'climb', 1  # climbing the right wall, nearly at the top
+        p.since = p.frame - 6  # up to speed (it eases in over 6 steps)
         for _ in range(5):
             p.step()
         assert p.state == 'ceiling' and p.dir == -1 and p.y == T, (p.state, p.dir, p.y)
         p.draw()  # hanging picture hugs the top
-        p.timer, p.x = 10 ** 6, L + 1  # monkey-barred all the way across
+        p.timer, p.x, p.since = 10 ** 6, L + 1, p.frame - 6  # monkey-barred all the way across
         p.step()
         assert p.state == 'fall'
         # a window under a falling pet becomes its floor; it rides along when the window moves; walks off its end
-        win = (12345, L + 100, T + 400, L + 700)
-        app.win = win
+        def window(l, t, r):
+            app.rects, app.ledges = {12345: (l, t, r, t + 300)}, [(12345, l, t, r)]
+        window(L + 100, T + 400, L + 700)
         p.x, p.y, p.vx, p.vy, p.ledge = L + 300, T + 400 - p.px - 30, 0, 5, None
         p.set('fall')
         for _ in range(10):
             p.step()
         assert p.ledge and p.state in ('land', 'idle') and p.y == T + 400 - p.px, (p.state, p.y)
-        app.win = (12345, L + 150, T + 380, L + 750)
+        window(L + 150, T + 380, L + 750)
         p.step()
         assert p.y == T + 380 - p.px and p.ledge[1] == L + 150, 'rides the moved window'
         p.set('walk', 10 ** 6)
-        p.dir, p.x = 1, L + 750 - p.px
+        p.dir, p.x, p.since = 1, L + 750 - p.px, p.frame - 6
         p.step()
         assert p.state in ('sit', 'fall'), p.state
-        p.ledge, app.win = (12345, L + 150, T + 380, L + 750), None
+        p.ledge, app.rects, app.ledges = (12345, L + 150, T + 380), {}, []
         p.set('idle')
         p.step()
         assert not p.ledge and p.state == 'fall', 'window gone: falls'
         # leap from the floor onto a window above
         p.ledge, p.state, p.y, p.x = None, 'idle', B - p.px, L + 300
         random.seed(1)
-        app.win = (12345, L + 200, B - 300, L + 900)
+        window(L + 200, B - 300, L + 900)
         for _ in range(200):
-            p.next_move(app.win, p.x + p.px / 2)
+            p.next_move(p.x + p.px / 2)
             if p.state == 'fall' and p.vy < 0:
                 break
         for _ in range(200):
@@ -1919,7 +2639,34 @@ def selftest():
             if p.state != 'fall':
                 break
         assert p.ledge and p.y == B - 300 - p.px, ('jump onto window', p.state, p.y)
-        app.win = None
+        app.rects, app.ledges, p.ledge = {}, [], None
+        # a window in front covers part of a top edge: only the free part is a ledge
+        # clicked: a hop on the spot; called: runs to the pointer and stops there
+        p.x, p.y = L + 300, B - p.px
+        p.set('idle')
+        p.poke()
+        assert p.state == 'fall' and p.vy < 0 and p.leap
+        for _ in range(200):
+            p.step()
+        assert p.state in SOFT and p.y == B - p.px, (p.state, p.y)
+        p.set('idle')
+        p.call(L + 900)
+        assert p.state == 'run' and p.dir == 1
+        for _ in range(300):
+            p.frame += 1
+            p.step()
+            if p.goal is None:
+                break
+        assert p.state == 'idle' and abs(p.x + p.px / 2 - L - 900) < p.px, (p.state, p.x)
+        # two pets that meet stop and face each other
+        app.add('', save=False)
+        q = app.pets[-1]
+        q.x, q.y, q.dir = p.x + p.px, p.y, 1
+        q.set('walk')
+        p.set('walk')
+        app.mingle()
+        assert p.state in ('idle', 'sit') and (p.dir, q.dir) == (1, -1), (p.state, p.dir, q.dir)
+        app.remove(q, count=False)
         for st in ('run', 'chase', 'lie', 'dance'):  # new poses draw for the blob
             p.state = st
             p.draw()
@@ -1970,7 +2717,7 @@ def selftest():
         app.settings['off'] = [a for a in ACTIONS if a != 'sit']
         for _ in range(20):
             p.set('idle', 1)
-            p.next_move(None, 0)
+            p.next_move(0)
             assert p.state in ('idle', 'sit'), p.state
         app.settings['off'] = []
         app.open_settings()
@@ -2020,7 +2767,7 @@ def selftest():
         globals()['clock_hour'] = lambda: 23
         for _ in range(60):  # night: never runs or dances
             p.set('idle', 1)
-            p.next_move(None, 0)
+            p.next_move(0)
             assert p.state in ('idle', 'sit', 'lie', 'walk'), p.state
         globals()['clock_hour'] = lambda: time.localtime().tm_hour
         panel.set_schedule('on', False)
@@ -2064,11 +2811,14 @@ if __name__ == '__main__':
         try:
             selftest()
         except Exception as e:  # exit code, not a crash dialog: release.ps1 runs this on the built exe
+            traceback.print_exc()
             print('selftest FAILED:', repr(e))
             sys.exit(1)
     else:
         if not single_instance():
             sys.exit()  # already running: it opens its Settings window instead
+        sys.excepthook = log_error
+        threading.excepthook = lambda a: log_error(a.exc_type, a.exc_value, a.exc_traceback)
         if FROZEN:
             try:
                 os.remove(sys.executable + '.old')  # leftover from the last update
