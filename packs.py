@@ -18,6 +18,27 @@ MAX_SIDE = 2048          # px
 MAX_FRAMES = 120         # per animation
 
 
+class Mirrored:
+    """The same pictures facing the other way; each one is flipped the first time it is shown."""
+
+    def __init__(self, seq):
+        self.seq, self.done = seq, {}
+
+    def __len__(self):
+        return len(self.seq)
+
+    def __getitem__(self, i):
+        if isinstance(i, slice):
+            return [self[n] for n in range(*i.indices(len(self.seq)))]
+        src = self.seq[i]
+        if id(src) not in self.done:  # seq keeps src alive, so its id stays its own
+            self.done[id(src)] = ImageOps.mirror(src)
+        return self.done[id(src)]
+
+    def __iter__(self):
+        return (self[n] for n in range(len(self.seq)))
+
+
 def _wanted(name):
     """Pack file name we keep (lowercase), or None. Only known state images and pack.json, nothing else."""
     base = os.path.basename(name).lower()
@@ -241,18 +262,21 @@ def scale_of(meta):
     return min(4, max(0.5, k)) if isinstance(k, (int, float)) and not isinstance(k, bool) else 1
 
 
-def load_frames(folder, px):
+def load_frames(folder, px, skip=(), only=None):
     """({state: (frames facing right, frames facing left)}, fps). Frames are PIL RGBA pictures fitted in a px square.
-    Animations come from pack.json "frames" ({state: [[image, ticks], ...]}, Shimeji style) or one file per state."""
+    Animations come from pack.json "frames" ({state: [[image, ticks], ...]}, Shimeji style) or one file per state.
+    States in skip, or outside only when it is given, are not loaded (idle always is). One direction is the
+    pictures as drawn, the other a Mirrored of them (flipped on first use), so neither costs memory unseen."""
     meta = read_meta(folder)
     fps = meta.get('fps', 8)
     fps = min(30, max(1, fps)) if isinstance(fps, (int, float)) and not isinstance(fps, bool) else 8
     cache = {}
+    wanted = lambda state: state == 'idle' or (state not in skip and (only is None or state in only))
 
     def frames_of(name):
-        """Every frame of one image file (an animated GIF has several), both directions."""
+        """Every frame of one image file (an animated GIF has several), as drawn."""
         if name not in cache:
-            right, left = [], []
+            right = []
             with Image.open(os.path.join(folder, name)) as im:
                 for fr in ImageSequence.Iterator(im):
                     fr = fr.convert('RGBA')
@@ -261,15 +285,14 @@ def load_frames(folder, px):
                     fr = fr.resize((max(1, round(fr.width * k)), max(1, round(fr.height * k))),
                                    Image.NEAREST if k >= 2 else Image.LANCZOS)
                     right.append(fr)
-                    left.append(ImageOps.mirror(fr))
-            cache[name] = (right, left)
+            cache[name] = right
         return cache[name]
 
     out = {}
     spec = meta.get('frames') if isinstance(meta.get('frames'), dict) else None
     if spec:
-        for state in STATES:
-            right, left = [], []
+        for state in filter(wanted, STATES):
+            right = []
             for entry in spec.get(state) or []:
                 if not (isinstance(entry, list) and len(entry) == 2 and isinstance(entry[0], str)
                         and isinstance(entry[1], int)):
@@ -277,17 +300,15 @@ def load_frames(folder, px):
                 name = os.path.basename(entry[0])  # never a path out of the pack folder
                 if not os.path.isfile(os.path.join(folder, name)):
                     continue
-                r, l = frames_of(name)
                 ticks = min(MAX_TICKS, max(1, entry[1]))
-                right += r * ticks  # a pose shown for n ticks = the same picture n times (no copies, same objects)
-                left += l * ticks
+                right += frames_of(name) * ticks  # a pose shown for n ticks = the same picture n times (no copies)
             if right:
-                out[state] = (right, left)
+                out[state] = (right, Mirrored(right))
     else:
         for name in os.listdir(folder):
             stem, ext = os.path.splitext(name.lower())
-            if stem in STATES and ext in EXTS:
-                out[stem] = frames_of(name)
+            if stem in STATES and ext in EXTS and wanted(stem):
+                out[stem] = (frames_of(name), Mirrored(frames_of(name)))
     if meta.get('faces') == 'left':  # drawn facing left (Shimeji): swap so 'right' really faces right
         out = {s: (l, r) for s, (r, l) in out.items()}
     return out, fps
